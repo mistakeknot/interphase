@@ -24,6 +24,10 @@ bats tests/shell/
 python3 -c "import json; json.load(open('.claude-plugin/plugin.json'))"
 ```
 
+## Interline Integration
+
+`_gate_update_statusline()` in `hooks/lib-gates.sh` writes `/tmp/clavain-bead-${session_id}.json` state files. These are read by the **interline** companion plugin's statusline renderer to display bead context (ID + phase) in the Claude Code status bar. No direct dependency — communication is via file-based sideband.
+
 ## Design Decisions
 
 - Libraries are sourced by consuming plugins (e.g., Clavain) via shim delegation
