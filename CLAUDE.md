@@ -1,4 +1,4 @@
-# beads-lifecycle
+# interline
 
 Companion plugin for Clavain that provides lifecycle phase tracking, gate validation, and work discovery for the Beads issue tracker.
 
