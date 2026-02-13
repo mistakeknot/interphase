@@ -114,11 +114,8 @@ discovery_scan_beads() {
     merged=$(jq -n --argjson a "$open_list" --argjson b "$ip_list" '$a + $b')
 
     local count
-    count=$(echo "$merged" | jq 'length')
-    if [[ "$count" == "0" || "$count" == "null" ]]; then
-        echo "[]"
-        return 0
-    fi
+    count=$(echo "$merged" | jq 'length' 2>/dev/null) || count=0
+    [[ "$count" == "null" ]] && count=0
 
     # Sort: priority ASC (P0 first), then updated_at DESC (most recent first), then id ASC (deterministic tiebreaker)
     # updated_at is an ISO 8601 string — lexicographic sort works for reverse ordering
@@ -188,7 +185,205 @@ discovery_scan_beads() {
         i=$((i + 1))
     done
 
+    # Append orphaned artifacts (unlinked docs without beads)
+    local orphans
+    orphans=$(discovery_scan_orphans 2>/dev/null) || orphans="[]"
+    if [[ "$orphans" != "[]" ]]; then
+        local orphan_count
+        orphan_count=$(echo "$orphans" | jq 'length' 2>/dev/null) || orphan_count=0
+        local j=0
+        while [[ $j -lt $orphan_count ]]; do
+            local orphan_json o_title o_path o_type
+            orphan_json=$(echo "$orphans" | jq ".[$j]")
+            o_title=$(echo "$orphan_json" | jq -r '.title // "Untitled"')
+            o_path=$(echo "$orphan_json" | jq -r '.path // ""')
+            o_type=$(echo "$orphan_json" | jq -r '.type // ""')
+
+            results=$(echo "$results" | jq \
+                --arg title "$o_title" \
+                --arg plan_path "$o_path" \
+                --arg type "$o_type" \
+                '. + [{id: null, title: $title, priority: 3, status: "orphan", action: "create_bead", plan_path: $plan_path, stale: false}]')
+
+            j=$((j + 1))
+        done
+    fi
+
     echo "$results"
+}
+
+# ─── Orphan Detection ─────────────────────────────────────────────────
+
+# Scan docs/{brainstorms,prds,plans} for markdown artifacts not linked to any
+# active bead. Returns JSON array of orphaned artifacts.
+#
+# An artifact is orphaned if:
+#   1. No bead ID found in file (unlinked artifact)
+#   2. Bead ID found but bead doesn't exist (deleted bead)
+# An artifact is NOT orphaned if:
+#   - Bead ID found and bead exists (active work, any status including closed)
+#
+# Output: JSON array [{path, type, title, bead_id}] or "[]" if no orphans.
+discovery_scan_orphans() {
+    local project_dir="${DISCOVERY_PROJECT_DIR:-.}"
+    local orphans="[]"
+
+    # Regex to extract bead IDs from markdown headers.
+    # Matches patterns like: **Bead:** Foo-abc123, Bead: Foo-xyz, <!-- Bead: Foo-123 -->
+    local bead_id_regex='[Bb]ead[*]*[[:space:]:]*([A-Za-z]+-[a-z0-9]+)'
+
+    local dir type
+    for dir in docs/brainstorms docs/prds docs/plans; do
+        [[ -d "${project_dir}/${dir}" ]] || continue
+
+        case "$dir" in
+            docs/brainstorms) type="brainstorm" ;;
+            docs/prds)        type="prd" ;;
+            docs/plans)       type="plan" ;;
+        esac
+
+        local file
+        while IFS= read -r -d '' file; do
+            # Extract title from first heading
+            local title=""
+            title=$(grep -m1 '^# ' "$file" 2>/dev/null | sed 's/^# //' || true)
+            [[ -z "$title" ]] && title="$(basename "$file" .md)"
+
+            # Extract bead ID(s) from file content
+            local bead_id=""
+            if grep -P "" /dev/null 2>/dev/null; then
+                bead_id=$(grep -oP "$bead_id_regex" "$file" 2>/dev/null | head -1 | grep -oP '[A-Za-z]+-[a-z0-9]+$' || true)
+            else
+                # Portable fallback: use grep -E
+                bead_id=$(grep -oE '[A-Za-z]+-[a-z0-9]+' <(grep -i 'bead' "$file" 2>/dev/null | head -1) 2>/dev/null | head -1 || true)
+            fi
+
+            if [[ -z "$bead_id" ]]; then
+                # No bead reference at all → unlinked orphan
+                local rel_path="${file#"${project_dir}/"}"
+                orphans=$(echo "$orphans" | jq \
+                    --arg path "$rel_path" \
+                    --arg type "$type" \
+                    --arg title "$title" \
+                    --arg bead_id "" \
+                    '. + [{path: $path, type: $type, title: $title, bead_id: $bead_id}]')
+            else
+                # Bead ID found — verify it still exists
+                if ! bd show "$bead_id" &>/dev/null; then
+                    # Bead was deleted → stale orphan
+                    local rel_path="${file#"${project_dir}/"}"
+                    orphans=$(echo "$orphans" | jq \
+                        --arg path "$rel_path" \
+                        --arg type "$type" \
+                        --arg title "$title" \
+                        --arg bead_id "$bead_id" \
+                        '. + [{path: $path, type: $type, title: $title, bead_id: $bead_id}]')
+                fi
+                # Bead exists (open, in_progress, or closed) → not orphan
+            fi
+        done < <(find "${project_dir}/${dir}" -name '*.md' -print0 2>/dev/null)
+    done
+
+    echo "$orphans"
+}
+
+# ─── Brief Scan ──────────────────────────────────────────────────────
+
+# Lightweight work state summary for session-start injection.
+# Uses a 60-second TTL cache to avoid repeated bd queries.
+# Output: 1-2 line plain text summary, or empty string if unavailable.
+discovery_brief_scan() {
+    # Guard: bd must be installed
+    if ! command -v bd &>/dev/null; then
+        return 0
+    fi
+
+    # Guard: .beads directory must exist
+    local project_dir="${DISCOVERY_PROJECT_DIR:-.}"
+    if [[ ! -d "${project_dir}/.beads" ]]; then
+        return 0
+    fi
+
+    # Cache path — unique per project directory
+    local cache_key="${project_dir//\//_}"
+    local cache_file="/tmp/clavain-discovery-brief-${cache_key}.cache"
+
+    # Check TTL (60 seconds)
+    if [[ -f "$cache_file" ]]; then
+        local cache_mtime now cache_age
+        cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
+        now=$(date +%s)
+        cache_age=$(( now - cache_mtime ))
+        if [[ $cache_age -lt 60 && $cache_age -ge 0 ]]; then
+            # Cache is fresh — validate then return
+            local cached
+            cached=$(cat "$cache_file" 2>/dev/null) || cached=""
+            if [[ -n "$cached" ]]; then
+                echo "$cached"
+                return 0
+            fi
+        fi
+    fi
+
+    # Cache stale or missing — query bd
+    local open_json
+    open_json=$(bd list --status=open --json 2>/dev/null) || return 0
+    local ip_json
+    ip_json=$(bd list --status=in_progress --json 2>/dev/null) || ip_json="[]"
+
+    # Validate JSON before processing
+    echo "$open_json" | jq empty 2>/dev/null || return 0
+    echo "$ip_json" | jq empty 2>/dev/null || ip_json="[]"
+
+    # Count beads
+    local open_count ip_count
+    open_count=$(echo "$open_json" | jq 'length' 2>/dev/null) || open_count=0
+    ip_count=$(echo "$ip_json" | jq 'length' 2>/dev/null) || ip_count=0
+    local total_count=$(( open_count + ip_count ))
+
+    if [[ "$total_count" -eq 0 ]]; then
+        # No open work — cache empty result but don't output anything
+        echo "" > "$cache_file" 2>/dev/null || true
+        return 0
+    fi
+
+    # Find highest-priority item across both lists
+    local merged top_id top_title top_priority top_action
+    merged=$(jq -n --argjson a "$open_json" --argjson b "$ip_json" '$a + $b | sort_by(.priority) | .[0]')
+    top_id=$(echo "$merged" | jq -r '.id // empty')
+    top_title=$(echo "$merged" | jq -r '.title // "Untitled"')
+    top_priority=$(echo "$merged" | jq -r '.priority // 4')
+
+    # Infer action for the top item (if function available)
+    top_action="Review"
+    if [[ -n "$top_id" ]]; then
+        local top_status
+        top_status=$(echo "$merged" | jq -r '.status // "open"')
+        local action_result
+        action_result=$(infer_bead_action "$top_id" "$top_status" 2>/dev/null) || action_result="brainstorm|"
+        local action_verb="${action_result%%|*}"
+        case "$action_verb" in
+            continue)   top_action="Continue" ;;
+            execute)    top_action="Execute plan for" ;;
+            plan)       top_action="Plan" ;;
+            strategize) top_action="Strategize" ;;
+            brainstorm) top_action="Brainstorm" ;;
+            *)          top_action="Review" ;;
+        esac
+    fi
+
+    # Build summary
+    local summary
+    if [[ "$ip_count" -gt 0 ]]; then
+        summary="${total_count} open beads (${ip_count} in-progress). Top: ${top_action} ${top_id} — ${top_title} (P${top_priority})"
+    else
+        summary="${total_count} open beads. Top: ${top_action} ${top_id} — ${top_title} (P${top_priority})"
+    fi
+
+    # Write to cache
+    echo "$summary" > "$cache_file" 2>/dev/null || true
+
+    echo "$summary"
 }
 
 # ─── Telemetry ────────────────────────────────────────────────────────

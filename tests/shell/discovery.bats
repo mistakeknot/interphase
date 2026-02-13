@@ -332,3 +332,220 @@ mock_bd_garbage() {
 
     [[ $(echo "$output" | jq '.[0].stale') == "false" ]]
 }
+
+# ─── discovery_scan_orphans: detection ───────────────────────────────
+
+@test "orphans: detects unlinked artifact (no bead header)" {
+    mkdir -p "$TEST_PROJECT/docs/brainstorms"
+    cat > "$TEST_PROJECT/docs/brainstorms/my-idea.md" <<'MDEOF'
+# My Great Idea
+
+Some brainstorm content without any bead reference.
+MDEOF
+
+    # Mock bd so bd show always fails (no beads exist)
+    bd() { return 1; }
+    export -f bd
+
+    run discovery_scan_orphans
+    assert_success
+
+    local count
+    count=$(echo "$output" | jq 'length')
+    [[ "$count" == "1" ]]
+    [[ $(echo "$output" | jq -r '.[0].type') == "brainstorm" ]]
+    [[ $(echo "$output" | jq -r '.[0].title') == "My Great Idea" ]]
+    [[ $(echo "$output" | jq -r '.[0].bead_id') == "" ]]
+}
+
+@test "orphans: detects artifact with deleted bead" {
+    mkdir -p "$TEST_PROJECT/docs/plans"
+    cat > "$TEST_PROJECT/docs/plans/old-plan.md" <<'MDEOF'
+# Old Plan
+
+**Bead:** Test-deleted1
+
+Plan for something that was cleaned up.
+MDEOF
+
+    # Mock bd show to fail (bead was deleted)
+    bd() {
+        if [[ "$1" == "show" ]]; then return 1; fi
+        return 0
+    }
+    export -f bd
+
+    run discovery_scan_orphans
+    assert_success
+
+    local count
+    count=$(echo "$output" | jq 'length')
+    [[ "$count" == "1" ]]
+    [[ $(echo "$output" | jq -r '.[0].type') == "plan" ]]
+    [[ $(echo "$output" | jq -r '.[0].bead_id') == "Test-deleted1" ]]
+}
+
+@test "orphans: skips artifact linked to existing bead" {
+    mkdir -p "$TEST_PROJECT/docs/prds"
+    cat > "$TEST_PROJECT/docs/prds/active-prd.md" <<'MDEOF'
+# Active PRD
+
+**Bead:** Test-active1
+
+This PRD is tracked by an active bead.
+MDEOF
+
+    # Mock bd show to succeed (bead exists)
+    bd() {
+        if [[ "$1" == "show" && "$2" == "Test-active1" ]]; then return 0; fi
+        return 1
+    }
+    export -f bd
+
+    run discovery_scan_orphans
+    assert_success
+
+    local count
+    count=$(echo "$output" | jq 'length')
+    [[ "$count" == "0" ]]
+}
+
+@test "orphans: returns empty array when no docs directories exist" {
+    # Don't create any docs directories
+    run discovery_scan_orphans
+    assert_success
+    assert_output "[]"
+}
+
+@test "orphans: detects across multiple directories" {
+    mkdir -p "$TEST_PROJECT/docs/brainstorms" "$TEST_PROJECT/docs/plans"
+    echo "# Orphan Brainstorm" > "$TEST_PROJECT/docs/brainstorms/orphan1.md"
+    echo "# Orphan Plan" > "$TEST_PROJECT/docs/plans/orphan2.md"
+
+    bd() { return 1; }
+    export -f bd
+
+    run discovery_scan_orphans
+    assert_success
+
+    local count
+    count=$(echo "$output" | jq 'length')
+    [[ "$count" == "2" ]]
+}
+
+# ─── discovery_scan_beads: orphan integration ────────────────────────
+
+@test "discovery: includes orphans in scan results" {
+    # Create an unlinked artifact
+    mkdir -p "$TEST_PROJECT/docs/brainstorms"
+    echo "# Untracked Idea" > "$TEST_PROJECT/docs/brainstorms/untracked.md"
+
+    # Mock bd: no open beads, but bd show fails (for orphan check)
+    mock_bd '[]'
+    # Override bd to also handle 'show' calls
+    bd() {
+        if [[ "$1" == "list" ]]; then
+            if [[ "$*" == *"--status=in_progress"* ]]; then
+                echo "[]"
+            else
+                echo "[]"
+            fi
+            return 0
+        fi
+        if [[ "$1" == "show" ]]; then return 1; fi
+        return 1
+    }
+    export -f bd
+
+    run discovery_scan_beads
+    assert_success
+
+    local count
+    count=$(echo "$output" | jq 'length')
+    [[ "$count" -ge 1 ]]
+    # Orphan entry should have action: "create_bead"
+    [[ $(echo "$output" | jq -r '.[-1].action') == "create_bead" ]]
+    [[ $(echo "$output" | jq '.[-1].id') == "null" ]]
+}
+
+# ─── discovery_brief_scan: cached output ─────────────────────────────
+
+@test "brief_scan: outputs summary with open beads" {
+    mock_bd '[
+        {"id":"Test-b1","title":"Fix auth","status":"open","priority":1,"updated_at":"2026-02-12T10:00:00Z"},
+        {"id":"Test-b2","title":"Add tests","status":"open","priority":3,"updated_at":"2026-02-12T10:00:00Z"}
+    ]'
+
+    run discovery_brief_scan
+    assert_success
+
+    # Should contain count and top priority item
+    [[ "$output" == *"open beads"* ]]
+    [[ "$output" == *"Test-b1"* ]]
+    [[ "$output" == *"Fix auth"* ]]
+}
+
+@test "brief_scan: shows in-progress count" {
+    local open_json='[{"id":"Test-o1","title":"Open","status":"open","priority":2,"updated_at":"2026-02-12T10:00:00Z"}]'
+    local ip_json='[{"id":"Test-ip1","title":"Active","status":"in_progress","priority":1,"updated_at":"2026-02-12T10:00:00Z"}]'
+    mock_bd "$open_json" "$ip_json"
+
+    run discovery_brief_scan
+    assert_success
+
+    [[ "$output" == *"in-progress"* ]]
+    [[ "$output" == *"2 open beads"* ]]
+}
+
+@test "brief_scan: returns nothing when bd unavailable" {
+    # Hide bd from PATH
+    local old_path="$PATH"
+    PATH="/nonexistent"
+    unset _DISCOVERY_LOADED
+    source "$HOOKS_DIR/lib-discovery.sh"
+
+    run discovery_brief_scan
+    PATH="$old_path"
+    assert_success
+    assert_output ""
+}
+
+@test "brief_scan: returns nothing when no open beads" {
+    mock_bd '[]'
+    run discovery_brief_scan
+    assert_success
+    assert_output ""
+}
+
+@test "brief_scan: uses cache on second call" {
+    mock_bd '[{"id":"Test-c1","title":"Cached","status":"open","priority":1,"updated_at":"2026-02-12T10:00:00Z"}]'
+
+    # First call populates cache
+    run discovery_brief_scan
+    assert_success
+    local first_output="$output"
+
+    # Replace bd mock with something different
+    bd() {
+        if [[ "$1" == "list" ]]; then
+            echo '[{"id":"Test-c2","title":"Different","status":"open","priority":1,"updated_at":"2026-02-12T10:00:00Z"}]'
+            return 0
+        fi
+        return 1
+    }
+    export -f bd
+
+    # Second call should return cached result (Test-c1, not Test-c2)
+    run discovery_brief_scan
+    assert_success
+    [[ "$output" == *"Test-c1"* ]]
+    [[ "$output" != *"Test-c2"* ]]
+}
+
+@test "brief_scan: returns nothing when .beads dir missing" {
+    rmdir "$TEST_PROJECT/.beads"
+    mock_bd '[]'
+    run discovery_brief_scan
+    assert_success
+    assert_output ""
+}
