@@ -2,12 +2,88 @@
 # Work discovery scanner library for Clavain.
 # Sourced by commands/lfg.md (on-demand discovery) and hooks/session-start.sh (future F4).
 # All functions emit structured JSON to stdout. Errors emit sentinel strings.
+# Multi-factor scoring (F8): priority + phase + recency - staleness.
 
 # Guard against double-sourcing
 [[ -n "${_DISCOVERY_LOADED:-}" ]] && return 0
 _DISCOVERY_LOADED=1
 
 DISCOVERY_PROJECT_DIR="${DISCOVERY_PROJECT_DIR:-.}"
+
+# Source lib-phase.sh for phase_get (needed for phase-aware scoring)
+_DISCOVERY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${_DISCOVERY_SCRIPT_DIR}/lib-phase.sh" ]]; then
+    PHASE_PROJECT_DIR="$DISCOVERY_PROJECT_DIR" source "${_DISCOVERY_SCRIPT_DIR}/lib-phase.sh" 2>/dev/null || true
+fi
+
+# ─── Multi-Factor Scoring (F8) ────────────────────────────────────────
+
+# Score a bead for discovery ranking.
+# Formula: priority_score + phase_score + recency_score + staleness_penalty
+# Higher score = more important / more actionable.
+#
+# Args: $1 = priority (0-4), $2 = phase, $3 = updated_at (ISO 8601), $4 = stale (true/false)
+# Output: integer score to stdout
+score_bead() {
+    local priority="${1:-4}"
+    local phase="${2:-}"
+    local updated_at="${3:-}"
+    local stale="${4:-false}"
+
+    local score=0
+
+    # Priority score (0-60): strategic importance dominates
+    # Gap between tiers is large enough that phase+recency can't invert 2-tier difference
+    case "$priority" in
+        0) score=$((score + 60)) ;;
+        1) score=$((score + 48)) ;;
+        2) score=$((score + 36)) ;;
+        3) score=$((score + 24)) ;;
+        *) score=$((score + 12)) ;;
+    esac
+
+    # Phase score (0-30): work in progress > ready to start > early stages
+    case "$phase" in
+        shipping)            score=$((score + 30)) ;;
+        executing)           score=$((score + 28)) ;;
+        plan-reviewed)       score=$((score + 24)) ;;
+        planned)             score=$((score + 18)) ;;
+        strategized)         score=$((score + 12)) ;;
+        brainstorm-reviewed) score=$((score + 8)) ;;
+        brainstorm)          score=$((score + 4)) ;;
+        *)                   score=$((score + 0)) ;;
+    esac
+
+    # Recency score (0-20): recently touched beads are more relevant
+    if [[ -n "$updated_at" && "$updated_at" != "null" ]]; then
+        local updated_epoch now_epoch age_hours
+        updated_epoch=$(date -d "$updated_at" +%s 2>/dev/null || echo "")
+        now_epoch=$(date +%s)
+        if [[ -n "$updated_epoch" && "$updated_epoch" -gt 0 ]]; then
+            age_hours=$(( (now_epoch - updated_epoch) / 3600 ))
+            if [[ $age_hours -lt 24 ]]; then
+                score=$((score + 20))
+            elif [[ $age_hours -lt 48 ]]; then
+                score=$((score + 15))
+            elif [[ $age_hours -lt 168 ]]; then  # 7 days
+                score=$((score + 10))
+            else
+                score=$((score + 5))
+            fi
+        else
+            score=$((score + 5))  # Can't parse date, default low
+        fi
+    else
+        score=$((score + 5))
+    fi
+
+    # Staleness penalty
+    if [[ "$stale" == "true" ]]; then
+        score=$((score - 10))
+    fi
+
+    echo "$score"
+}
 
 # ─── Action Inference ─────────────────────────────────────────────────
 
@@ -57,7 +133,26 @@ infer_bead_action() {
         fi
     fi
 
-    # Priority: in_progress > has plan > has PRD > has brainstorm > nothing
+    # Phase-aware action inference (overrides filesystem-based logic when phase is available)
+    local phase=""
+    if command -v phase_get &>/dev/null && [[ -n "$bead_id" ]]; then
+        phase=$(phase_get "$bead_id" 2>/dev/null) || phase=""
+    fi
+
+    if [[ -n "$phase" ]]; then
+        case "$phase" in
+            brainstorm)          echo "strategize|${brainstorm_path}"; return 0 ;;
+            brainstorm-reviewed) echo "strategize|${brainstorm_path}"; return 0 ;;
+            strategized)         echo "plan|${prd_path}"; return 0 ;;
+            planned)             echo "execute|${plan_path}"; return 0 ;;
+            plan-reviewed)       echo "execute|${plan_path}"; return 0 ;;
+            executing)           echo "continue|${plan_path}"; return 0 ;;
+            shipping)            echo "ship|${plan_path}"; return 0 ;;
+            done)                echo "closed|"; return 0 ;;
+        esac
+    fi
+
+    # Fallback: filesystem-based inference (no phase set)
     if [[ "$status" == "in_progress" ]]; then
         echo "continue|${plan_path}"
     elif [[ -n "$plan_path" ]]; then
@@ -117,13 +212,7 @@ discovery_scan_beads() {
     count=$(echo "$merged" | jq 'length' 2>/dev/null) || count=0
     [[ "$count" == "null" ]] && count=0
 
-    # Sort: priority ASC (P0 first), then updated_at DESC (most recent first), then id ASC (deterministic tiebreaker)
-    # updated_at is an ISO 8601 string — lexicographic sort works for reverse ordering
-    # The id tiebreaker ensures identical priority+timestamp beads always appear in the same order
-    local sorted
-    sorted=$(echo "$merged" | jq 'sort_by(.priority, .updated_at, .id) | reverse | sort_by(.priority)')
-
-    # Build result array
+    # Build result array with multi-factor scoring (F8)
     local results="[]"
     local two_days_ago
     two_days_ago=$(date -d '2 days ago' +%s 2>/dev/null || date -v-2d +%s 2>/dev/null || echo 0)
@@ -131,7 +220,7 @@ discovery_scan_beads() {
     local i=0
     while [[ $i -lt $count ]]; do
         local bead_json
-        bead_json=$(echo "$sorted" | jq ".[$i]")
+        bead_json=$(echo "$merged" | jq ".[$i]")
 
         # Extract fields with validation
         local id status priority title updated
@@ -147,7 +236,15 @@ discovery_scan_beads() {
             continue
         fi
 
-        # Infer action via filesystem scan
+        # Read phase for this bead (F8: phase-aware scoring)
+        # TODO(performance): phase_get is O(n) subprocess calls. For >50 beads,
+        # consider caching phase state in /tmp/clavain-phase-cache-${session_id}.json
+        local phase=""
+        if command -v phase_get &>/dev/null; then
+            phase=$(phase_get "$id" 2>/dev/null) || phase=""
+        fi
+
+        # Infer action via filesystem scan (now phase-aware)
         local action_result action plan_path
         action_result=$(infer_bead_action "$id" "$status")
         action="${action_result%%|*}"
@@ -171,7 +268,11 @@ discovery_scan_beads() {
             fi
         fi
 
-        # Append to results using jq (safe JSON construction — no injection risk)
+        # Multi-factor score (F8)
+        local score
+        score=$(score_bead "$priority" "$phase" "$updated" "$stale")
+
+        # Append to results with phase and score fields
         results=$(echo "$results" | jq \
             --arg id "$id" \
             --arg title "$title" \
@@ -180,7 +281,9 @@ discovery_scan_beads() {
             --arg action "$action" \
             --arg plan_path "$plan_path" \
             --argjson stale "$stale" \
-            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale}]')
+            --arg phase "$phase" \
+            --argjson score "${score:-0}" \
+            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale, phase: $phase, score: $score}]')
 
         i=$((i + 1))
     done
@@ -203,11 +306,14 @@ discovery_scan_beads() {
                 --arg title "$o_title" \
                 --arg plan_path "$o_path" \
                 --arg type "$o_type" \
-                '. + [{id: null, title: $title, priority: 3, status: "orphan", action: "create_bead", plan_path: $plan_path, stale: false}]')
+                '. + [{id: null, title: $title, priority: 3, status: "orphan", action: "create_bead", plan_path: $plan_path, stale: false, phase: "", score: 0}]')
 
             j=$((j + 1))
         done
     fi
+
+    # Sort by score DESC, then id ASC (deterministic tiebreaker)
+    results=$(echo "$results" | jq 'sort_by(-.score, .id)')
 
     echo "$results"
 }
@@ -371,6 +477,8 @@ discovery_brief_scan() {
             plan)       top_action="Plan" ;;
             strategize) top_action="Strategize" ;;
             brainstorm) top_action="Brainstorm" ;;
+            ship)       top_action="Ship" ;;
+            closed)     top_action="Review (closed)" ;;
             *)          top_action="Review" ;;
         esac
     fi

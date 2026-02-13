@@ -527,3 +527,345 @@ EOF
     [[ $(echo "$line" | jq -r '.bead_phase') == "executing" ]]
     [[ $(echo "$line" | jq -r '.artifact_phase') == "planned" ]]
 }
+
+# ─── Enforcement Mock Helpers ──────────────────────────────────────
+
+# Mock bd that returns a given phase AND priority for enforcement testing
+mock_bd_enforce() {
+    local phase="$1"
+    local priority="${2:-2}"
+    export MOCK_BD_PHASE="$phase"
+    export MOCK_BD_PRIORITY="$priority"
+    export MOCK_BD_NOTES=""
+    bd() {
+        case "$1" in
+            state)
+                echo "$MOCK_BD_PHASE"
+                return 0
+                ;;
+            set-state)
+                return 0
+                ;;
+            show)
+                if [[ "$*" == *"--json"* ]]; then
+                    echo "{\"id\":\"$2\",\"priority\":$MOCK_BD_PRIORITY,\"status\":\"open\"}"
+                fi
+                return 0
+                ;;
+            update)
+                if [[ "$*" == *"--append-notes"* ]]; then
+                    # Capture the notes argument
+                    shift 2  # skip 'update <id>'
+                    while [[ $# -gt 0 ]]; do
+                        case "$1" in
+                            --append-notes) export MOCK_BD_NOTES="$2"; shift 2 ;;
+                            *) shift ;;
+                        esac
+                    done
+                fi
+                return 0
+                ;;
+        esac
+        return 1
+    }
+    export -f bd
+}
+
+# ─── Phase Cycling (H1) ──────────────────────────────────────────────
+
+@test "transitions: shipping to planned is valid (phase cycling)" {
+    run is_valid_transition "shipping" "planned"
+    assert_success
+}
+
+@test "transitions: shipping to brainstorm is valid (phase cycling)" {
+    run is_valid_transition "shipping" "brainstorm"
+    assert_success
+}
+
+@test "transitions: done to brainstorm is valid (new iteration)" {
+    run is_valid_transition "done" "brainstorm"
+    assert_success
+}
+
+@test "transitions: done to planned is valid (follow-up work)" {
+    run is_valid_transition "done" "planned"
+    assert_success
+}
+
+# ─── get_enforcement_tier ────────────────────────────────────────────
+
+@test "get_enforcement_tier: P0 returns hard" {
+    mock_bd_enforce "brainstorm" 0
+    run get_enforcement_tier "Test-001"
+    assert_success
+    assert_output "hard"
+}
+
+@test "get_enforcement_tier: P1 returns hard" {
+    mock_bd_enforce "brainstorm" 1
+    run get_enforcement_tier "Test-001"
+    assert_success
+    assert_output "hard"
+}
+
+@test "get_enforcement_tier: P2 returns soft" {
+    mock_bd_enforce "brainstorm" 2
+    run get_enforcement_tier "Test-001"
+    assert_success
+    assert_output "soft"
+}
+
+@test "get_enforcement_tier: P3 returns soft" {
+    mock_bd_enforce "brainstorm" 3
+    run get_enforcement_tier "Test-001"
+    assert_success
+    assert_output "soft"
+}
+
+@test "get_enforcement_tier: P4 returns none" {
+    mock_bd_enforce "brainstorm" 4
+    run get_enforcement_tier "Test-001"
+    assert_success
+    assert_output "none"
+}
+
+@test "get_enforcement_tier: empty bead_id returns none" {
+    run get_enforcement_tier ""
+    assert_success
+    assert_output "none"
+}
+
+@test "get_enforcement_tier: bd unavailable returns none" {
+    # Mock bd to always fail (simulates unavailable)
+    bd() { return 127; }
+    export -f bd
+    run get_enforcement_tier "Test-001"
+    assert_success
+    assert_output "none"
+}
+
+# ─── enforce_gate ────────────────────────────────────────────────────
+
+@test "enforce_gate: valid transition passes for hard tier" {
+    mock_bd_enforce "brainstorm" 0
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_success
+}
+
+@test "enforce_gate: invalid transition blocks for hard tier (P0)" {
+    mock_bd_enforce "brainstorm" 0
+    run enforce_gate "Test-001" "shipping"
+    assert_failure
+    assert_output --partial "ERROR: phase gate blocked"
+}
+
+@test "enforce_gate: invalid transition blocks for hard tier (P1)" {
+    mock_bd_enforce "brainstorm" 1
+    run enforce_gate "Test-001" "shipping"
+    assert_failure
+    assert_output --partial "ERROR: phase gate blocked"
+}
+
+@test "enforce_gate: invalid transition warns for soft tier (P2)" {
+    mock_bd_enforce "brainstorm" 2
+    run enforce_gate "Test-001" "shipping"
+    assert_success
+    assert_output --partial "WARNING: phase gate would block"
+}
+
+@test "enforce_gate: invalid transition warns for soft tier (P3)" {
+    mock_bd_enforce "brainstorm" 3
+    run enforce_gate "Test-001" "shipping"
+    assert_success
+    assert_output --partial "WARNING: phase gate would block"
+}
+
+@test "enforce_gate: no gate for P4" {
+    mock_bd_enforce "brainstorm" 4
+    run enforce_gate "Test-001" "shipping"
+    assert_success
+    # No warning for P4
+    refute_output --partial "WARNING"
+    refute_output --partial "ERROR"
+}
+
+@test "enforce_gate: CLAVAIN_SKIP_GATE overrides hard block" {
+    mock_bd_enforce "brainstorm" 0
+    export CLAVAIN_SKIP_GATE="Emergency hotfix"
+    run enforce_gate "Test-001" "shipping"
+    assert_success
+    unset CLAVAIN_SKIP_GATE
+}
+
+@test "enforce_gate: CLAVAIN_SKIP_GATE records in bead notes" {
+    mock_bd_enforce "brainstorm" 0
+    export CLAVAIN_SKIP_GATE="Emergency hotfix"
+    enforce_gate "Test-001" "shipping" 2>/dev/null
+    [[ "$MOCK_BD_NOTES" == *"Gate skipped"* ]]
+    [[ "$MOCK_BD_NOTES" == *"Emergency hotfix"* ]]
+    unset CLAVAIN_SKIP_GATE
+}
+
+@test "enforce_gate: CLAVAIN_DISABLE_GATES bypasses all enforcement" {
+    mock_bd_enforce "brainstorm" 0
+    export CLAVAIN_DISABLE_GATES=true
+    run enforce_gate "Test-001" "shipping"
+    assert_success
+    assert_output --partial "WARNING: gate enforcement DISABLED"
+    unset CLAVAIN_DISABLE_GATES
+}
+
+@test "enforce_gate: fail-safe on empty bead_id" {
+    run enforce_gate "" "brainstorm"
+    assert_success
+}
+
+@test "enforce_gate: fail-safe on empty target" {
+    run enforce_gate "Test-001" ""
+    assert_success
+}
+
+@test "enforce_gate: fail-safe when bd unavailable" {
+    # Mock bd to always fail (simulates unavailable)
+    bd() { return 127; }
+    export -f bd
+    run enforce_gate "Test-001" "brainstorm"
+    assert_success
+}
+
+# ─── enforce_gate: telemetry ─────────────────────────────────────────
+
+@test "enforce_gate: logs enforcement decision to telemetry" {
+    mock_bd_enforce "brainstorm" 0
+    enforce_gate "Test-001" "brainstorm-reviewed" 2>/dev/null
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    [[ -f "$file" ]]
+    # Find the gate_enforce event (skip gate_check events)
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    echo "$enforce_line" | jq empty
+    [[ $(echo "$enforce_line" | jq -r '.event') == "gate_enforce" ]]
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "pass" ]]
+}
+
+@test "enforce_gate: logs block decision to telemetry" {
+    mock_bd_enforce "brainstorm" 0
+    enforce_gate "Test-001" "shipping" 2>/dev/null || true
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "block" ]]
+}
+
+@test "enforce_gate: logs skip decision to telemetry" {
+    mock_bd_enforce "brainstorm" 0
+    export CLAVAIN_SKIP_GATE="test skip"
+    enforce_gate "Test-001" "shipping" 2>/dev/null
+    unset CLAVAIN_SKIP_GATE
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "skip" ]]
+    [[ $(echo "$enforce_line" | jq -r '.reason') == "test skip" ]]
+}
+
+# ─── check_review_staleness ─────────────────────────────────────────
+
+@test "check_review_staleness: returns none when no review dir" {
+    run check_review_staleness "Test-001" "docs/plans/test.md"
+    assert_success
+    assert_output "none"
+}
+
+@test "check_review_staleness: returns none when no findings.json" {
+    mkdir -p "$TEST_PROJECT/docs/research/flux-drive/test"
+    run check_review_staleness "Test-001" "docs/plans/test.md"
+    assert_success
+    assert_output "none"
+}
+
+@test "check_review_staleness: returns fresh when artifact not modified" {
+    # Create a review that references our bead
+    mkdir -p "$TEST_PROJECT/docs/research/flux-drive/test-review"
+    local future_date
+    future_date=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%SZ)
+    echo "{\"bead_id\":\"Test-001\",\"reviewed\":\"$future_date\",\"input\":\"docs/plans/test.md\"}" \
+        > "$TEST_PROJECT/docs/research/flux-drive/test-review/findings.json"
+
+    # Create the artifact
+    mkdir -p "$TEST_PROJECT/docs/plans"
+    echo "# Plan" > "$TEST_PROJECT/docs/plans/test.md"
+
+    # Init git repo for git log check
+    cd "$TEST_PROJECT"
+    git init -q
+    git config user.email "test@test.com"
+    git config user.name "Test"
+    git add -A && git commit -q -m "init"
+
+    run check_review_staleness "Test-001" "docs/plans/test.md"
+    assert_success
+    assert_output "fresh"
+}
+
+@test "check_review_staleness: returns stale when artifact modified after review" {
+    # Create a review with a past date
+    mkdir -p "$TEST_PROJECT/docs/research/flux-drive/test-review"
+    echo '{"bead_id":"Test-001","reviewed":"2026-02-10T10:00:00Z","input":"docs/plans/test.md"}' \
+        > "$TEST_PROJECT/docs/research/flux-drive/test-review/findings.json"
+
+    # Create and commit the artifact after the review date
+    mkdir -p "$TEST_PROJECT/docs/plans"
+    echo "# Plan" > "$TEST_PROJECT/docs/plans/test.md"
+    cd "$TEST_PROJECT"
+    git init -q
+    git config user.email "test@test.com"
+    git config user.name "Test"
+    git add -A && git commit -q -m "init" --date="2026-02-11T10:00:00Z"
+
+    run check_review_staleness "Test-001" "docs/plans/test.md"
+    assert_success
+    assert_output "stale"
+}
+
+@test "check_review_staleness: returns unknown when reviewed date missing" {
+    mkdir -p "$TEST_PROJECT/docs/research/flux-drive/test-review"
+    echo '{"bead_id":"Test-001","input":"docs/plans/test.md"}' \
+        > "$TEST_PROJECT/docs/research/flux-drive/test-review/findings.json"
+
+    run check_review_staleness "Test-001" "docs/plans/test.md"
+    assert_success
+    assert_output "unknown"
+}
+
+@test "check_review_staleness: returns none with empty artifact_path" {
+    run check_review_staleness "Test-001" ""
+    assert_success
+    assert_output "none"
+}
+
+@test "check_review_staleness: matches by bead_id not stem" {
+    # Review dir has a different name than the artifact
+    mkdir -p "$TEST_PROJECT/docs/research/flux-drive/totally-different-name"
+    local future_date
+    future_date=$(date -u -d '+1 hour' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+1H +%Y-%m-%dT%H:%M:%SZ)
+    echo "{\"bead_id\":\"Test-001\",\"reviewed\":\"$future_date\",\"input\":\"docs/plans/old-name.md\"}" \
+        > "$TEST_PROJECT/docs/research/flux-drive/totally-different-name/findings.json"
+
+    mkdir -p "$TEST_PROJECT/docs/plans"
+    echo "# Plan" > "$TEST_PROJECT/docs/plans/renamed-plan.md"
+    cd "$TEST_PROJECT"
+    git init -q
+    git config user.email "test@test.com"
+    git config user.name "Test"
+    git add -A && git commit -q -m "init"
+
+    # Should find the review by bead_id even though artifact name doesn't match
+    run check_review_staleness "Test-001" "docs/plans/renamed-plan.md"
+    assert_success
+    assert_output "fresh"
+}

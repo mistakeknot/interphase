@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Shared gate library for Clavain lifecycle phase transitions.
-# Provides validation, dual persistence (beads + artifact headers), and fallback reading.
-# This is a library only — no enforcement (that's F7).
+# Provides validation, dual persistence (beads + artifact headers), fallback reading,
+# tiered enforcement (F7), and stale review detection.
 #
 # Sources lib-phase.sh internally (reuses phase_set, phase_get, CLAVAIN_PHASES).
 # All public functions are fail-safe: return 0 on error, never block workflow.
+# Set CLAVAIN_DISABLE_GATES=true to bypass all enforcement (emergency escape hatch).
 
 # Guard against double-sourcing
 [[ -n "${_GATES_LOADED:-}" ]] && return 0
@@ -40,6 +41,11 @@ VALID_TRANSITIONS=(
     "planned:executing"
     "plan-reviewed:shipping"
     "executing:done"
+    # Phase cycling (re-entry for new milestones)
+    "shipping:brainstorm"
+    "shipping:planned"
+    "done:brainstorm"
+    "done:planned"
 )
 
 # Directories whose artifacts get **Phase:** headers.
@@ -95,6 +101,200 @@ check_phase_gate() {
         return 1
     fi
 }
+
+# ─── Enforcement (F7) ──────────────────────────────────────────────
+
+# Get the enforcement tier for a bead based on its priority.
+# Returns: hard (P0/P1), soft (P2/P3), or none (P4+)
+#
+# Args: $1 = bead_id
+# Output: tier string to stdout
+get_enforcement_tier() {
+    local bead_id="${1:-}"
+
+    if [[ -z "$bead_id" ]]; then
+        echo "none"
+        return 0
+    fi
+
+    local priority
+    priority=$(bd show "$bead_id" --json 2>/dev/null | jq -r '.priority // 4' 2>/dev/null) || priority=4
+    [[ "$priority" == "null" || -z "$priority" ]] && priority=4
+
+    case "$priority" in
+        0|1) echo "hard" ;;
+        2|3) echo "soft" ;;
+        *)   echo "none" ;;
+    esac
+}
+
+# Check if a flux-drive review for an artifact is stale.
+# Uses bead-ID matching to find review (survives file renames).
+#
+# Args: $1 = bead_id, $2 = artifact_path
+# Output: "fresh", "stale", "none" (no review), or "unknown" (indeterminate)
+check_review_staleness() {
+    local bead_id="${1:-}"
+    local artifact_path="${2:-}"
+
+    if [[ -z "$artifact_path" ]]; then
+        echo "none"
+        return 0
+    fi
+
+    local project_dir="${GATES_PROJECT_DIR:-.}"
+    local research_dir="${project_dir}/docs/research/flux-drive"
+
+    if [[ ! -d "$research_dir" ]]; then
+        echo "none"
+        return 0
+    fi
+
+    # Strategy 1: Find review by bead-ID in findings.json
+    local findings_file="" reviewed_date=""
+    local candidate
+    while IFS= read -r -d '' candidate; do
+        # Check if this review references our bead or our artifact
+        if [[ -n "$bead_id" ]] && jq -e --arg bid "$bead_id" '.bead_id == $bid or (.input // "" | contains($bid))' "$candidate" &>/dev/null; then
+            findings_file="$candidate"
+            break
+        fi
+        # Fallback: check if artifact path matches
+        if [[ -n "$artifact_path" ]]; then
+            local input_path
+            input_path=$(jq -r '.input // ""' "$candidate" 2>/dev/null) || continue
+            if [[ "$input_path" == *"$(basename "$artifact_path")"* ]]; then
+                findings_file="$candidate"
+                break
+            fi
+        fi
+    done < <(find "$research_dir" -name 'findings.json' -print0 2>/dev/null)
+
+    if [[ -z "$findings_file" ]]; then
+        echo "none"
+        return 0
+    fi
+
+    # Read reviewed timestamp
+    reviewed_date=$(jq -r '.reviewed // ""' "$findings_file" 2>/dev/null) || {
+        echo "unknown"
+        return 0
+    }
+
+    if [[ -z "$reviewed_date" || "$reviewed_date" == "null" ]]; then
+        echo "unknown"
+        return 0
+    fi
+
+    # Check if artifact has been modified since the review
+    if [[ -n "$artifact_path" && -f "${project_dir}/${artifact_path}" ]]; then
+        local commits_after
+        commits_after=$(cd "$project_dir" && git log --oneline --since="$reviewed_date" -- "$artifact_path" 2>/dev/null | head -1) || {
+            echo "unknown"
+            return 0
+        }
+        if [[ -n "$commits_after" ]]; then
+            echo "stale"
+            return 0
+        fi
+    fi
+
+    echo "fresh"
+}
+
+# Enforce a phase gate with priority-based tiering.
+# Wraps check_phase_gate() with tier logic and audit trail.
+#
+# Tiers: hard (P0/P1) = block, soft (P2/P3) = warn, none (P4) = skip
+# Override: set CLAVAIN_SKIP_GATE="reason" to bypass hard blocks.
+# Emergency: set CLAVAIN_DISABLE_GATES=true to skip all enforcement.
+#
+# Args: $1 = bead_id, $2 = target_phase, $3 = artifact_path (optional)
+# Returns: 0 = proceed, 1 = hard block
+enforce_gate() {
+    local bead_id="${1:-}"
+    local target="${2:-}"
+    local artifact_path="${3:-}"
+    local skip_reason="${CLAVAIN_SKIP_GATE:-}"
+
+    # Emergency bypass
+    if [[ "${CLAVAIN_DISABLE_GATES:-}" == "true" ]]; then
+        echo "WARNING: gate enforcement DISABLED by CLAVAIN_DISABLE_GATES" >&2
+        _gate_log_enforcement "$bead_id" "?" "none" "bypass" "CLAVAIN_DISABLE_GATES"
+        return 0
+    fi
+
+    # Fail-safe: if inputs are missing, allow
+    if [[ -z "$bead_id" || -z "$target" ]]; then
+        return 0
+    fi
+
+    # Get enforcement tier
+    local tier
+    tier=$(get_enforcement_tier "$bead_id" 2>/dev/null) || tier="none"
+
+    # No-gate tier: skip entirely
+    if [[ "$tier" == "none" ]]; then
+        _gate_log_enforcement "$bead_id" "?" "$tier" "pass-no-gate" ""
+        return 0
+    fi
+
+    # Check phase gate
+    if check_phase_gate "$bead_id" "$target" "$artifact_path" 2>/dev/null; then
+        # Valid transition — proceed regardless of tier
+        _gate_log_enforcement "$bead_id" "?" "$tier" "pass" ""
+        return 0
+    fi
+
+    # Invalid transition — check staleness
+    local staleness="unknown"
+    if [[ -n "$artifact_path" ]]; then
+        staleness=$(check_review_staleness "$bead_id" "$artifact_path" 2>/dev/null) || staleness="unknown"
+    fi
+
+    # Handle by tier
+    case "$tier" in
+        hard)
+            # Check for skip override
+            if [[ -n "$skip_reason" ]]; then
+                # Record skip in bead notes (fail-safe: continue even if write fails)
+                local audit_entry="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Gate skipped: $target (tier=hard, reason: $skip_reason)"
+                bd update "$bead_id" --append-notes "$audit_entry" 2>/dev/null || {
+                    echo "WARNING: failed to write skip-gate audit entry for $bead_id" >&2
+                }
+                _gate_log_enforcement "$bead_id" "?" "$tier" "skip" "$skip_reason"
+                return 0
+            fi
+
+            # Stale review = soft warning (not hard block) even for P0/P1
+            if [[ "$staleness" == "stale" ]]; then
+                echo "WARNING: review is stale for $bead_id — run /clavain:flux-drive to refresh" >&2
+                _gate_log_enforcement "$bead_id" "?" "$tier" "warn-stale" ""
+                return 0
+            fi
+
+            # Hard block
+            echo "ERROR: phase gate blocked $target for $bead_id (tier=hard)" >&2
+            echo "  Set CLAVAIN_SKIP_GATE=\"reason\" to override, or run /clavain:flux-drive first" >&2
+            _gate_log_enforcement "$bead_id" "?" "$tier" "block" ""
+            return 1
+            ;;
+        soft)
+            # Soft gates always proceed with warning
+            echo "WARNING: phase gate would block $target for $bead_id (tier=soft, proceeding)" >&2
+            if [[ "$staleness" == "stale" ]]; then
+                echo "  Review is stale — consider running /clavain:flux-drive" >&2
+            fi
+            _gate_log_enforcement "$bead_id" "?" "$tier" "warn" ""
+            return 0
+            ;;
+    esac
+
+    # Shouldn't reach here, but fail-safe
+    return 0
+}
+
+# ─── Phase Management ──────────────────────────────────────────────
 
 # Advance the phase: set on bead (via phase_set) and write to artifact header.
 # Fail-safe: never blocks workflow.
@@ -312,6 +512,28 @@ _gate_log_advance() {
         --arg artifact "$artifact" \
         --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{event: $event, bead: $bead, phase: $phase, reason: $reason, artifact: $artifact, timestamp: $ts}' \
+        >> "$telemetry_file" 2>/dev/null || true
+}
+
+_gate_log_enforcement() {
+    local bead_id="$1"
+    local priority="${2:-?}"
+    local tier="$3"
+    local decision="$4"
+    local reason="${5:-}"
+    local telemetry_file="${HOME}/.clavain/telemetry.jsonl"
+
+    mkdir -p "$(dirname "$telemetry_file")" 2>/dev/null || return 0
+
+    jq -n -c \
+        --arg event "gate_enforce" \
+        --arg bead "$bead_id" \
+        --arg priority "$priority" \
+        --arg tier "$tier" \
+        --arg decision "$decision" \
+        --arg reason "$reason" \
+        --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{event: $event, bead: $bead, priority: $priority, tier: $tier, decision: $decision, reason: $reason, timestamp: $ts}' \
         >> "$telemetry_file" 2>/dev/null || true
 }
 

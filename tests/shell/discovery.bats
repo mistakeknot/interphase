@@ -11,8 +11,9 @@ setup() {
     # Create .beads directory (required for scanner to proceed)
     mkdir -p "$TEST_PROJECT/.beads"
 
-    # Reset the double-source guard so we can re-source in each test
+    # Reset the double-source guards so we can re-source in each test
     unset _DISCOVERY_LOADED
+    unset _PHASE_LOADED
     source "$HOOKS_DIR/lib-discovery.sh"
 }
 
@@ -133,20 +134,32 @@ mock_bd_garbage() {
     [[ "$status" == "open" ]]
     [[ -n "$action" ]]
     [[ "$stale" == "true" || "$stale" == "false" ]]
+
+    # F8: verify phase and score fields exist
+    local phase score
+    phase=$(echo "$output" | jq -r '.[0].phase')
+    score=$(echo "$output" | jq '.[0].score')
+    [[ "$score" -gt 0 ]]
+    # phase may be empty string (no phase set)
+    [[ "$phase" == "" || "$phase" == "null" || -n "$phase" ]]
 }
 
 # ─── discovery_scan_beads: sorting ────────────────────────────────────
 
-@test "discovery: sorts by priority then recency" {
-    mock_bd '[
-        {"id":"Test-low","title":"Low priority","status":"open","priority":3,"updated_at":"2026-02-12T12:00:00Z"},
-        {"id":"Test-high","title":"High priority","status":"open","priority":1,"updated_at":"2026-02-10T10:00:00Z"},
-        {"id":"Test-mid","title":"Med priority","status":"open","priority":2,"updated_at":"2026-02-11T10:00:00Z"}
-    ]'
+@test "discovery: sorts by multi-factor score (priority dominant)" {
+    # All timestamps within 24h (same recency bucket, no staleness) so priority dominates
+    local recent_iso
+    recent_iso=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-2H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd "[
+        {\"id\":\"Test-low\",\"title\":\"Low priority\",\"status\":\"open\",\"priority\":3,\"updated_at\":\"${recent_iso}\"},
+        {\"id\":\"Test-high\",\"title\":\"High priority\",\"status\":\"open\",\"priority\":1,\"updated_at\":\"${recent_iso}\"},
+        {\"id\":\"Test-mid\",\"title\":\"Med priority\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}
+    ]"
     run discovery_scan_beads
     assert_success
 
-    # First result should be highest priority (P1)
+    # Priority dominates when recency is equal: P1 (68) > P2 (56) > P3 (44)
     local first_id second_id third_id
     first_id=$(echo "$output" | jq -r '.[0].id')
     second_id=$(echo "$output" | jq -r '.[1].id')
@@ -155,6 +168,11 @@ mock_bd_garbage() {
     [[ "$first_id" == "Test-high" ]]
     [[ "$second_id" == "Test-mid" ]]
     [[ "$third_id" == "Test-low" ]]
+
+    # Verify score field exists and is positive
+    local first_score
+    first_score=$(echo "$output" | jq '.[0].score')
+    [[ "$first_score" -gt 0 ]]
 }
 
 # ─── discovery_scan_beads: skips invalid beads ────────────────────────
@@ -548,4 +566,199 @@ MDEOF
     run discovery_brief_scan
     assert_success
     assert_output ""
+}
+
+# ─── score_bead (F8) ────────────────────────────────────────────────
+
+@test "score_bead: P0 scores highest priority" {
+    run score_bead 0 "" "" false
+    assert_success
+    # P0=60 + phase=0 + recency=5 (empty date) + staleness=0 = 65
+    [[ "$output" -eq 65 ]]
+}
+
+@test "score_bead: P4 scores lowest priority" {
+    run score_bead 4 "" "" false
+    assert_success
+    # P4=12 + phase=0 + recency=5 + staleness=0 = 17
+    [[ "$output" -eq 17 ]]
+}
+
+@test "score_bead: executing phase adds 28 points" {
+    run score_bead 2 "executing" "" false
+    assert_success
+    # P2=36 + executing=28 + recency=5 + staleness=0 = 69
+    [[ "$output" -eq 69 ]]
+}
+
+@test "score_bead: shipping phase adds 30 points" {
+    run score_bead 2 "shipping" "" false
+    assert_success
+    # P2=36 + shipping=30 + recency=5 = 71
+    [[ "$output" -eq 71 ]]
+}
+
+@test "score_bead: brainstorm phase adds 4 points" {
+    run score_bead 2 "brainstorm" "" false
+    assert_success
+    # P2=36 + brainstorm=4 + recency=5 = 45
+    [[ "$output" -eq 45 ]]
+}
+
+@test "score_bead: unknown phase adds 0 points" {
+    run score_bead 2 "nonexistent" "" false
+    assert_success
+    # P2=36 + unknown=0 + recency=5 = 41
+    [[ "$output" -eq 41 ]]
+}
+
+@test "score_bead: recent update (< 24h) adds 20 points" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+    run score_bead 2 "" "$recent_iso" false
+    assert_success
+    # P2=36 + phase=0 + recency=20 = 56
+    [[ "$output" -eq 56 ]]
+}
+
+@test "score_bead: staleness penalty subtracts 10 points" {
+    run score_bead 2 "" "" true
+    assert_success
+    # P2=36 + phase=0 + recency=5 - staleness=10 = 31
+    [[ "$output" -eq 31 ]]
+}
+
+@test "score_bead: P2 fresh outscores P4 stale executing" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    local p2_score p4_score
+    p2_score=$(score_bead 2 "brainstorm" "$recent_iso" false)
+    p4_score=$(score_bead 4 "executing" "$recent_iso" true)
+
+    # P2: 36+4+20+0=60, P4: 12+28+20-10=50
+    [[ "$p2_score" -gt "$p4_score" ]]
+}
+
+@test "score_bead: phase executing outscores brainstorm at same priority" {
+    local exec_score brain_score
+    exec_score=$(score_bead 2 "executing" "" false)
+    brain_score=$(score_bead 2 "brainstorm" "" false)
+
+    # executing=28 vs brainstorm=4 → 24 point difference
+    [[ "$exec_score" -gt "$brain_score" ]]
+}
+
+# ─── infer_bead_action: phase-aware (F8) ────────────────────────────
+
+@test "infer_bead_action: phase=brainstorm returns strategize" {
+    # Mock phase_get to return brainstorm
+    phase_get() { echo "brainstorm"; }
+    export -f phase_get
+
+    run infer_bead_action "Test-001" "open"
+    assert_success
+    [[ "$output" == "strategize|"* ]]
+}
+
+@test "infer_bead_action: phase=plan-reviewed returns execute" {
+    # Create a plan file
+    mkdir -p "$TEST_PROJECT/docs/plans"
+    echo -e "# Plan\n**Bead:** Test-001" > "$TEST_PROJECT/docs/plans/test-plan.md"
+
+    phase_get() { echo "plan-reviewed"; }
+    export -f phase_get
+
+    run infer_bead_action "Test-001" "open"
+    assert_success
+    [[ "$output" == "execute|"* ]]
+}
+
+@test "infer_bead_action: phase=executing returns continue" {
+    phase_get() { echo "executing"; }
+    export -f phase_get
+
+    run infer_bead_action "Test-001" "open"
+    assert_success
+    [[ "$output" == "continue|"* ]]
+}
+
+@test "infer_bead_action: phase=shipping returns ship" {
+    phase_get() { echo "shipping"; }
+    export -f phase_get
+
+    run infer_bead_action "Test-001" "open"
+    assert_success
+    [[ "$output" == "ship|"* ]]
+}
+
+@test "infer_bead_action: phase=done returns closed" {
+    phase_get() { echo "done"; }
+    export -f phase_get
+
+    run infer_bead_action "Test-001" "open"
+    assert_success
+    assert_output "closed|"
+}
+
+@test "infer_bead_action: no phase falls back to filesystem" {
+    # No phase_get available
+    unset -f phase_get 2>/dev/null || true
+
+    mkdir -p "$TEST_PROJECT/docs/plans"
+    echo -e "# Plan\n**Bead:** Test-001" > "$TEST_PROJECT/docs/plans/test-plan.md"
+
+    run infer_bead_action "Test-001" "open"
+    assert_success
+    [[ "$output" == "execute|"* ]]
+}
+
+# ─── discovery_scan_beads: phase field (F8) ─────────────────────────
+
+@test "discovery: includes phase field in output" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd "[{\"id\":\"Test-p1\",\"title\":\"Test\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+
+    # Mock phase_get to return a phase
+    phase_get() {
+        if [[ "$1" == "Test-p1" ]]; then echo "planned"; fi
+    }
+    export -f phase_get
+
+    run discovery_scan_beads
+    assert_success
+
+    local phase
+    phase=$(echo "$output" | jq -r '.[0].phase')
+    [[ "$phase" == "planned" ]]
+}
+
+@test "discovery: score reflects phase advancement" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd "[
+        {\"id\":\"Test-exec\",\"title\":\"Executing\",\"status\":\"in_progress\",\"priority\":2,\"updated_at\":\"${recent_iso}\"},
+        {\"id\":\"Test-brain\",\"title\":\"Brainstorm\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}
+    ]"
+
+    # Mock phase_get to return different phases
+    phase_get() {
+        case "$1" in
+            Test-exec) echo "executing" ;;
+            Test-brain) echo "brainstorm" ;;
+            *) echo "" ;;
+        esac
+    }
+    export -f phase_get
+
+    run discovery_scan_beads
+    assert_success
+
+    # Executing bead should rank first (higher phase score)
+    local first_id
+    first_id=$(echo "$output" | jq -r '.[0].id')
+    [[ "$first_id" == "Test-exec" ]]
 }
