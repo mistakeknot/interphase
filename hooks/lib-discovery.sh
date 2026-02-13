@@ -318,7 +318,9 @@ discovery_brief_scan() {
             # Cache is fresh — validate then return
             local cached
             cached=$(cat "$cache_file" 2>/dev/null) || cached=""
-            if [[ -n "$cached" ]]; then
+            if [[ "$cached" == "NO_WORK" ]]; then
+                return 0  # Valid "no open beads" state
+            elif [[ -n "$cached" ]]; then
                 echo "$cached"
                 return 0
             fi
@@ -342,8 +344,9 @@ discovery_brief_scan() {
     local total_count=$(( open_count + ip_count ))
 
     if [[ "$total_count" -eq 0 ]]; then
-        # No open work — cache empty result but don't output anything
-        echo "" > "$cache_file" 2>/dev/null || true
+        # No open work — cache with sentinel so next call uses cache
+        local temp_cache="${cache_file}.$$"
+        echo "NO_WORK" > "$temp_cache" 2>/dev/null && mv -f "$temp_cache" "$cache_file" 2>/dev/null || true
         return 0
     fi
 
@@ -380,8 +383,9 @@ discovery_brief_scan() {
         summary="${total_count} open beads. Top: ${top_action} ${top_id} — ${top_title} (P${top_priority})"
     fi
 
-    # Write to cache
-    echo "$summary" > "$cache_file" 2>/dev/null || true
+    # Write to cache (atomic: temp file + rename prevents partial reads)
+    local temp_cache="${cache_file}.$$"
+    echo "$summary" > "$temp_cache" 2>/dev/null && mv -f "$temp_cache" "$cache_file" 2>/dev/null || true
 
     echo "$summary"
 }
