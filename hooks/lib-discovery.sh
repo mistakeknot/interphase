@@ -13,7 +13,7 @@ DISCOVERY_PROJECT_DIR="${DISCOVERY_PROJECT_DIR:-.}"
 # Source lib-phase.sh for phase_get (needed for phase-aware scoring)
 _DISCOVERY_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "${_DISCOVERY_SCRIPT_DIR}/lib-phase.sh" ]]; then
-    PHASE_PROJECT_DIR="$DISCOVERY_PROJECT_DIR" source "${_DISCOVERY_SCRIPT_DIR}/lib-phase.sh" 2>/dev/null || true
+    export PHASE_PROJECT_DIR="$DISCOVERY_PROJECT_DIR"; source "${_DISCOVERY_SCRIPT_DIR}/lib-phase.sh" 2>/dev/null || true
 fi
 
 # ─── Multi-Factor Scoring (F8) ────────────────────────────────────────
@@ -175,6 +175,10 @@ infer_bead_action() {
 #   - "[]" if no open beads
 #   - JSON array: [{id, title, priority, status, action, plan_path, stale}, ...]
 discovery_scan_beads() {
+    # Re-apply default in case caller used prefix assignment (VAR=x source ...) which
+    # rolls back after source completes, leaving the variable unset.
+    DISCOVERY_PROJECT_DIR="${DISCOVERY_PROJECT_DIR:-.}"
+
     # Guard: bd must be installed
     if ! command -v bd &>/dev/null; then
         echo "DISCOVERY_UNAVAILABLE"

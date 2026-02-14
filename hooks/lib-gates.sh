@@ -15,7 +15,7 @@ GATES_PROJECT_DIR="${GATES_PROJECT_DIR:-.}"
 
 # Source lib-phase.sh for phase_set, phase_get, phase_infer_bead, CLAVAIN_PHASES
 _GATES_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PHASE_PROJECT_DIR="$GATES_PROJECT_DIR" source "${_GATES_SCRIPT_DIR}/lib-phase.sh"
+export PHASE_PROJECT_DIR="$GATES_PROJECT_DIR"; source "${_GATES_SCRIPT_DIR}/lib-phase.sh"
 
 # ─── Phase Graph ─────────────────────────────────────────────────────
 
