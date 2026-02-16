@@ -9,6 +9,8 @@ description: Use when tracking work across sessions with Beads issue tracking â€
 
 Beads (`bd`) is a git-native issue tracker for persistent task tracking across sessions. Issues stored as JSONL in `.beads/`, synced via git, with hash-based IDs that prevent merge conflicts. Use it for work that spans multiple sessions or has dependencies. For simple single-session tasks, use in-memory `TaskCreate` instead.
 
+**IMPORTANT:** The beads database lives at the **Interverse monorepo root** (`/root/projects/Interverse/.beads/`), not in individual submodules. Always run `bd` commands from `/root/projects/Interverse/`. Submodule `.beads/` directories are read-only historical archives â€” running `bd` inside a submodule will fail with "no beads database found".
+
 **Backend:** Dolt (version-controlled SQL with cell-level merge) is the default. `.beads/dolt/` contains the database (gitignored). `.beads/issues.jsonl` is the git-portable sync layer. If Dolt issues surface, rebuild from JSONL: `bd doctor --fix --source=jsonl`.
 
 ## When to Use Beads vs TaskCreate
