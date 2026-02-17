@@ -507,6 +507,9 @@ _gate_update_statusline() {
         if [[ -n "$interband_file" ]]; then
             interband_write "$interband_file" "interphase" "bead_phase" "$session_id" "$payload_json" \
                 2>/dev/null || true
+            if type interband_prune_channel >/dev/null 2>&1; then
+                interband_prune_channel "interphase" "bead" 2>/dev/null || true
+            fi
         fi
     fi
 
