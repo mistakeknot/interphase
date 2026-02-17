@@ -22,10 +22,16 @@ export PHASE_PROJECT_DIR="$GATES_PROJECT_DIR"; source "${_GATES_SCRIPT_DIR}/lib-
 _gate_load_interband() {
     [[ "${_GATE_INTERBAND_LOADED:-0}" -eq 1 ]] && return 0
 
+    local repo_root=""
+    repo_root="$(git -C "$_GATES_SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || true)"
+
     local candidate
     for candidate in \
         "${INTERBAND_LIB:-}" \
-        "${_GATES_SCRIPT_DIR}/../../../infra/interband/lib/interband.sh"
+        "${_GATES_SCRIPT_DIR}/../../../infra/interband/lib/interband.sh" \
+        "${_GATES_SCRIPT_DIR}/../../../interband/lib/interband.sh" \
+        "${repo_root}/../interband/lib/interband.sh" \
+        "${HOME}/.local/share/interband/lib/interband.sh"
     do
         if [[ -n "$candidate" && -f "$candidate" ]]; then
             # shellcheck source=/dev/null

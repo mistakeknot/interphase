@@ -479,7 +479,16 @@ EOF
     [[ $(jq -r '.reason' "$state_file") == "Plan: docs/plans/test.md" ]]
     [[ $(jq -r '.ts' "$state_file") =~ ^[0-9]+$ ]]
 
+    local interband_file="$HOME/.interband/interphase/bead/test-session-abc.json"
+    [[ -f "$interband_file" ]]
+    [[ $(jq -r '.version' "$interband_file") == 1.* ]]
+    [[ $(jq -r '.namespace' "$interband_file") == "interphase" ]]
+    [[ $(jq -r '.type' "$interband_file") == "bead_phase" ]]
+    [[ $(jq -r '.payload.id' "$interband_file") == "Clavain-021h" ]]
+    [[ $(jq -r '.payload.phase' "$interband_file") == "planned" ]]
+
     rm -f "$state_file"
+    rm -f "$interband_file"
 }
 
 @test "_gate_update_statusline: skips silently when CLAUDE_SESSION_ID is unset" {
