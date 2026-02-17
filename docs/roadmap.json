@@ -1,0 +1,15 @@
+{
+  "module_summary": "Interphase manages phase tracking, gate enforcement, and work discovery within Clavain and bead-based workflows.",
+  "roadmap": {
+    "now": [
+      {"id": "IPHS-N1", "title": "Increase phase transition determinism and resilience across long sessions.", "priority": "P1"}
+    ],
+    "next": [
+      {"id": "IPHS-N2", "title": "Improve gate diagnostics for partial artifacts and stale state recovery.", "priority": "P2"},
+      {"id": "IPHS-N3", "title": "Add deeper inter-module phase telemetry to Clavain sprint orchestration.", "priority": "P2"},
+      {"id": "IPHS-L1", "title": "Prototype adaptive phase sequencing for non-linear execution paths.", "priority": "P2"}
+    ],
+    "later": [
+    ]
+  }
+}
