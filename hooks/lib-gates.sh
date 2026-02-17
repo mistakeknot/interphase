@@ -17,6 +17,26 @@ GATES_PROJECT_DIR="${GATES_PROJECT_DIR:-.}"
 _GATES_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PHASE_PROJECT_DIR="$GATES_PROJECT_DIR"; source "${_GATES_SCRIPT_DIR}/lib-phase.sh"
 
+# Optional shared sideband protocol library.
+# Fail-open: interphase keeps legacy behavior when interband is unavailable.
+_gate_load_interband() {
+    [[ "${_GATE_INTERBAND_LOADED:-0}" -eq 1 ]] && return 0
+
+    local candidate
+    for candidate in \
+        "${INTERBAND_LIB:-}" \
+        "${_GATES_SCRIPT_DIR}/../../../infra/interband/lib/interband.sh"
+    do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            # shellcheck source=/dev/null
+            source "$candidate" && _GATE_INTERBAND_LOADED=1 && return 0
+        fi
+    done
+
+    _GATE_INTERBAND_LOADED=0
+    return 1
+}
+
 # ─── Phase Graph ─────────────────────────────────────────────────────
 
 # Valid transitions as "from:to" strings. Empty from = first touch.
@@ -466,11 +486,27 @@ _gate_update_statusline() {
     local session_id="${CLAUDE_SESSION_ID:-}"
     [ -z "$session_id" ] && return 0
     local state_file="/tmp/clavain-bead-${session_id}.json"
-    jq -n -c \
+    local payload_json
+    payload_json=$(jq -n -c \
         --arg id "$bead_id" --arg phase "$phase" \
         --arg reason "$reason" --arg ts "$(date +%s)" \
         '{id:$id, phase:$phase, reason:$reason, ts:($ts|tonumber)}' \
-        > "$state_file" 2>/dev/null || true
+    ) || payload_json=""
+    [[ -z "$payload_json" ]] && return 0
+
+    # Preferred path: structured sideband envelope under ~/.interband.
+    if _gate_load_interband && type interband_path >/dev/null 2>&1 && type interband_write >/dev/null 2>&1; then
+        local interband_file
+        interband_file=$(interband_path "interphase" "bead" "$session_id" 2>/dev/null) || interband_file=""
+        if [[ -n "$interband_file" ]]; then
+            interband_write "$interband_file" "interphase" "bead_phase" "$session_id" "$payload_json" \
+                2>/dev/null || true
+        fi
+    fi
+
+    # Backward-compatible legacy path for existing consumers.
+    local tmp_file="${state_file}.tmp.$$"
+    printf '%s\n' "$payload_json" > "$tmp_file" 2>/dev/null && mv -f "$tmp_file" "$state_file" 2>/dev/null || true
 }
 
 # ─── Telemetry ───────────────────────────────────────────────────────

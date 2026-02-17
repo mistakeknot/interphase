@@ -26,11 +26,11 @@ python3 -c "import json; json.load(open('.claude-plugin/plugin.json'))"
 
 ## interline Integration
 
-`_gate_update_statusline()` in `hooks/lib-gates.sh` writes `/tmp/clavain-bead-${session_id}.json` state files. These are read by the **interline** companion plugin's statusline renderer to display bead context (ID + phase) in the Claude Code status bar. No direct dependency — communication is via file-based sideband.
+`_gate_update_statusline()` in `hooks/lib-gates.sh` writes structured sideband state to `~/.interband/interphase/bead/${session_id}.json` (envelope + payload), and also writes legacy `/tmp/clavain-bead-${session_id}.json` for backward compatibility. These are read by the **interline** companion plugin's statusline renderer to display bead context (ID + phase). No direct dependency — communication is via file-based sideband.
 
 ## Configuration
 
-interphase has no user-facing configuration. Visible output (statusline colors, labels, layers) is configured via the **interline** companion plugin (`~/.claude/interline.json`). The integration contract between interphase and interline is the bead state file format (`/tmp/clavain-bead-${session_id}.json`).
+interphase has no user-facing configuration. Visible output (statusline colors, labels, layers) is configured via the **interline** companion plugin (`~/.claude/interline.json`). The integration contract between interphase and interline is the sideband bead payload (`id`, `phase`, `reason`, `ts`) carried in `~/.interband/interphase/bead/${session_id}.json` (with legacy `/tmp/clavain-bead-${session_id}.json` fallback).
 
 ## Design Decisions
 
