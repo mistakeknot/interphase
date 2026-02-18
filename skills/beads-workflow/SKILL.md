@@ -36,7 +36,7 @@ bd show <id>                      # Detailed view with dependencies
 
 ### Creating Issues
 ```bash
-bd create --title="..." --type=task|bug|feature --priority=2
+bd create --title="..." --type=task|bug|feature|epic|decision --priority=2
 ```
 
 **Priority scale:** 0-4 or P0-P4 (0=critical, 2=medium, 4=backlog). NOT "high"/"medium"/"low".
@@ -73,8 +73,8 @@ bd blocked                         # Show all blocked issues
 
 ### Sync
 ```bash
-bd sync                  # Sync with git remote
-bd sync --status         # Check sync status
+bd sync                  # Compatibility sync step (0.50.x syncs, 0.51+ no-op)
+bd doctor                # Health/status check
 ```
 
 ## Workflow Modes
@@ -120,7 +120,7 @@ Beads databases grow over time. Keep them healthy:
 
 - **`bd doctor --fix --yes`** — runs daily via systemd timer; fixes common issues automatically
 - **`bd admin cleanup --older-than 30 --force`** — prunes closed issues older than 30 days (always recoverable from git history)
-- **`bd sync`** — commits hygiene changes to git
+- **`bd sync`** — compatibility sync step for mixed beads versions (0.50.x syncs, 0.51+ no-op)
 - **Manual upgrade**: Run `bd upgrade` periodically to get latest fixes (not automated — requires binary install)
 
 If you see "issues.jsonl too large" or agents failing to parse beads, run `bd admin cleanup --older-than 7 --force` for aggressive cleanup.
@@ -134,9 +134,9 @@ The daily hygiene runs at 6:15 AM Pacific across all projects in `/root/projects
 ```bash
 git status              # Check what changed
 git add <files>         # Stage code changes
-bd sync                 # Commit beads changes
+bd sync                 # Compatibility sync step (0.50.x syncs, 0.51+ no-op)
 git commit -m "..."     # Commit code
-bd sync                 # Commit any new beads changes
+bd sync                 # Optional second pass in legacy git-portable setups
 git push                # Push to remote
 ```
 
@@ -154,7 +154,7 @@ bd update <id> --claim                # Atomically claim it
 **Completing work:**
 ```bash
 bd close <id1> <id2> ...    # Close completed issues
-bd sync                     # Push to remote
+bd sync                     # Compatibility sync step (0.50.x syncs, 0.51+ no-op)
 ```
 
 **Creating dependent work:**
