@@ -212,6 +212,12 @@ discovery_scan_beads() {
     local merged
     merged=$(jq -n --argjson a "$open_list" --argjson b "$ip_list" '$a + $b')
 
+    # Lane filter: if DISCOVERY_LANE is set, filter to beads with lane:<name> label
+    if [[ -n "${DISCOVERY_LANE:-}" && "$DISCOVERY_LANE" != "*" ]]; then
+        merged=$(echo "$merged" | jq --arg lane "lane:${DISCOVERY_LANE}" \
+            '[.[] | select(.labels // [] | any(. == $lane))]')
+    fi
+
     local count
     count=$(echo "$merged" | jq 'length' 2>/dev/null) || count=0
     [[ "$count" == "null" ]] && count=0
@@ -446,6 +452,14 @@ discovery_brief_scan() {
     # Validate JSON before processing
     echo "$open_json" | jq empty 2>/dev/null || return 0
     echo "$ip_json" | jq empty 2>/dev/null || ip_json="[]"
+
+    # Lane filter: if DISCOVERY_LANE is set, filter to beads with lane:<name> label
+    if [[ -n "${DISCOVERY_LANE:-}" && "$DISCOVERY_LANE" != "*" ]]; then
+        open_json=$(echo "$open_json" | jq --arg lane "lane:${DISCOVERY_LANE}" \
+            '[.[] | select(.labels // [] | any(. == $lane))]')
+        ip_json=$(echo "$ip_json" | jq --arg lane "lane:${DISCOVERY_LANE}" \
+            '[.[] | select(.labels // [] | any(. == $lane))]')
+    fi
 
     # Count beads
     local open_count ip_count
