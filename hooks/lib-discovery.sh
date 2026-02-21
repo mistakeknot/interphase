@@ -166,6 +166,34 @@ infer_bead_action() {
     fi
 }
 
+# ─── Parent-Closed Detection ─────────────────────────────────────────
+
+# Build a lookup table of open beads whose parent epic is closed.
+# Output: newline-delimited "child_id:parent_epic_id" pairs.
+# Performs a batch pre-scan: O(closed_epics), not O(open_beads).
+# Fails silently — returns empty output on any error.
+_discovery_build_stale_parent_map() {
+    local closed_epics
+    closed_epics=$(bd list --status=closed --type=epic --json 2>/dev/null) || { echo ""; return 0; }
+
+    local epic_ids
+    epic_ids=$(echo "$closed_epics" | jq -r '.[].id' 2>/dev/null) || { echo ""; return 0; }
+
+    local epic_id
+    for epic_id in $epic_ids; do
+        [[ -z "$epic_id" ]] && continue
+        local children
+        children=$(bd dep list "$epic_id" --direction=up --type=parent-child --json 2>/dev/null) || continue
+        local open_child_ids
+        open_child_ids=$(echo "$children" | jq -r '.[] | select(.status == "open" or .status == "in_progress") | .id' 2>/dev/null) || continue
+        local child_id
+        for child_id in $open_child_ids; do
+            [[ -z "$child_id" ]] && continue
+            echo "${child_id}:${epic_id}"
+        done
+    done
+}
+
 # ─── Scanner ──────────────────────────────────────────────────────────
 
 # Scan open beads and rank by priority then recency.
@@ -227,6 +255,16 @@ discovery_scan_beads() {
     local two_days_ago
     two_days_ago=$(date -d '2 days ago' +%s 2>/dev/null || date -v-2d +%s 2>/dev/null || echo 0)
 
+    # Build parent-closed lookup table (batch pre-scan, O(closed_epics))
+    declare -A _stale_parent_map
+    local _spm_line
+    while IFS= read -r _spm_line; do
+        [[ -z "$_spm_line" ]] && continue
+        local _spm_child="${_spm_line%%:*}"
+        local _spm_parent="${_spm_line#*:}"
+        _stale_parent_map["$_spm_child"]="$_spm_parent"
+    done < <(_discovery_build_stale_parent_map)
+
     local i=0
     while [[ $i -lt $count ]]; do
         local bead_json
@@ -246,6 +284,9 @@ discovery_scan_beads() {
             continue
         fi
 
+        # Parent-closed check: if this bead's parent epic is closed, flag it
+        local parent_closed_epic="${_stale_parent_map[$id]:-}"
+
         # Read phase for this bead (F8: phase-aware scoring)
         # TODO(performance): phase_get is O(n) subprocess calls. For >50 beads,
         # consider caching phase state in /tmp/clavain-phase-cache-${session_id}.json
@@ -254,11 +295,16 @@ discovery_scan_beads() {
             phase=$(phase_get "$id" 2>/dev/null) || phase=""
         fi
 
-        # Infer action via filesystem scan (now phase-aware)
+        # Infer action — short-circuit to verify_done if parent epic is closed
         local action_result action plan_path
-        action_result=$(infer_bead_action "$id" "$status")
-        action="${action_result%%|*}"
-        plan_path="${action_result#*|}"
+        if [[ -n "$parent_closed_epic" ]]; then
+            action="verify_done"
+            plan_path=""
+        else
+            action_result=$(infer_bead_action "$id" "$status")
+            action="${action_result%%|*}"
+            plan_path="${action_result#*|}"
+        fi
 
         # Staleness check: plan mtime if available, else bead updated_at
         # Default to not-stale on any error (stat failure, date parse failure)
@@ -282,6 +328,11 @@ discovery_scan_beads() {
         local score
         score=$(score_bead "$priority" "$phase" "$updated" "$stale")
 
+        # Closed-parent penalty: push stale-parent beads to bottom of ranking
+        if [[ -n "$parent_closed_epic" ]]; then
+            score=$((score - 30))
+        fi
+
         # Append to results with phase and score fields
         results=$(echo "$results" | jq \
             --arg id "$id" \
@@ -293,7 +344,8 @@ discovery_scan_beads() {
             --argjson stale "$stale" \
             --arg phase "$phase" \
             --argjson score "${score:-0}" \
-            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale, phase: $phase, score: $score}]')
+            --arg parent_closed_epic "${parent_closed_epic:-}" \
+            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale, phase: $phase, score: $score, parent_closed_epic: (if $parent_closed_epic == "" then null else $parent_closed_epic end)}]')
 
         i=$((i + 1))
     done

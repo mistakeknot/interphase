@@ -762,3 +762,172 @@ MDEOF
     first_id=$(echo "$output" | jq -r '.[0].id')
     [[ "$first_id" == "Test-exec" ]]
 }
+
+# ─── Parent-Closed Detection ─────────────────────────────────────────
+
+# Mock bd that also handles closed epic queries and dep list
+mock_bd_with_closed_parent() {
+    local open_json="${1:-[]}"
+    local ip_json="${2:-[]}"
+    export MOCK_BD_JSON="$open_json"
+    export MOCK_BD_IP_JSON="$ip_json"
+    bd() {
+        if [[ "$1" == "list" ]]; then
+            if [[ "$*" == *"--type=epic"*"--status=closed"* ]] || [[ "$*" == *"--status=closed"*"--type=epic"* ]]; then
+                echo '[{"id":"Test-epic1","title":"Done epic","status":"closed","issue_type":"epic"}]'
+                return 0
+            fi
+            if [[ "$*" == *"--status=in_progress"* ]]; then
+                echo "$MOCK_BD_IP_JSON"
+            else
+                echo "$MOCK_BD_JSON"
+            fi
+            return 0
+        fi
+        if [[ "$1" == "dep" && "$2" == "list" ]]; then
+            if [[ "$3" == "Test-epic1" ]]; then
+                echo '[{"id":"Test-orphan1","title":"Orphaned child","status":"open","dependency_type":"parent-child"}]'
+                return 0
+            fi
+            echo '[]'
+            return 0
+        fi
+        if [[ "$1" == "show" ]]; then
+            return 0
+        fi
+        return 1
+    }
+    export -f bd
+}
+
+@test "discovery: bead with closed parent gets action=verify_done" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd_with_closed_parent \
+        "[{\"id\":\"Test-orphan1\",\"title\":\"Orphaned child\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+
+    run discovery_scan_beads
+    assert_success
+
+    local action
+    action=$(echo "$output" | jq -r '.[0].action')
+    [[ "$action" == "verify_done" ]]
+}
+
+@test "discovery: bead with closed parent gets -30 score penalty" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    # Test with closed parent
+    mock_bd_with_closed_parent \
+        "[{\"id\":\"Test-orphan1\",\"title\":\"Orphaned child\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+    run discovery_scan_beads
+    assert_success
+    local penalized_score
+    penalized_score=$(echo "$output" | jq '.[0].score')
+
+    # Test same bead without closed parent
+    mock_bd \
+        "[{\"id\":\"Test-orphan1\",\"title\":\"Orphaned child\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+    run discovery_scan_beads
+    assert_success
+    local normal_score
+    normal_score=$(echo "$output" | jq '.[0].score')
+
+    # Penalized score should be 30 less
+    [[ $((normal_score - penalized_score)) -eq 30 ]]
+}
+
+@test "discovery: bead with closed parent includes parent_closed_epic field" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd_with_closed_parent \
+        "[{\"id\":\"Test-orphan1\",\"title\":\"Orphaned child\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+
+    run discovery_scan_beads
+    assert_success
+
+    local parent
+    parent=$(echo "$output" | jq -r '.[0].parent_closed_epic')
+    [[ "$parent" == "Test-epic1" ]]
+}
+
+@test "discovery: bead without closed parent uses normal action" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd \
+        "[{\"id\":\"Test-normal1\",\"title\":\"Normal bead\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+
+    run discovery_scan_beads
+    assert_success
+
+    local action parent
+    action=$(echo "$output" | jq -r '.[0].action')
+    parent=$(echo "$output" | jq -r '.[0].parent_closed_epic')
+    [[ "$action" != "verify_done" ]]
+    [[ "$parent" == "null" ]]
+}
+
+@test "discovery: stale parent map empty when no closed epics" {
+    # Mock bd with no closed epics
+    bd() {
+        if [[ "$1" == "list" ]]; then
+            if [[ "$*" == *"--type=epic"*"--status=closed"* ]] || [[ "$*" == *"--status=closed"*"--type=epic"* ]]; then
+                echo '[]'
+                return 0
+            fi
+            if [[ "$*" == *"--status=in_progress"* ]]; then
+                echo '[]'
+            else
+                echo '[{"id":"Test-ok1","title":"Normal","status":"open","priority":2,"updated_at":"2026-02-12T10:00:00Z"}]'
+            fi
+            return 0
+        fi
+        return 1
+    }
+    export -f bd
+
+    run discovery_scan_beads
+    assert_success
+
+    local action
+    action=$(echo "$output" | jq -r '.[0].action')
+    [[ "$action" != "verify_done" ]]
+}
+
+@test "discovery: stale parent check graceful when bd dep list fails" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    # Mock bd where dep list always fails
+    bd() {
+        if [[ "$1" == "list" ]]; then
+            if [[ "$*" == *"--type=epic"*"--status=closed"* ]] || [[ "$*" == *"--status=closed"*"--type=epic"* ]]; then
+                echo '[{"id":"Test-epic1","title":"Done","status":"closed","issue_type":"epic"}]'
+                return 0
+            fi
+            if [[ "$*" == *"--status=in_progress"* ]]; then
+                echo '[]'
+            else
+                echo "[{\"id\":\"Test-child1\",\"title\":\"Child\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+            fi
+            return 0
+        fi
+        if [[ "$1" == "dep" ]]; then
+            return 1  # dep list fails
+        fi
+        return 1
+    }
+    export -f bd
+
+    run discovery_scan_beads
+    assert_success
+
+    # Should still work — child just won't be flagged as verify_done
+    local action
+    action=$(echo "$output" | jq -r '.[0].action')
+    [[ "$action" != "verify_done" ]]
+}
