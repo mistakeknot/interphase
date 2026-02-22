@@ -14,5 +14,8 @@
     "discovery",
     "workflow",
     "issue-tracking"
+  ],
+  "skills": [
+    "./skills/beads-workflow"
   ]
 }
