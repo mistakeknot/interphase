@@ -333,6 +333,26 @@ discovery_scan_beads() {
             score=$((score - 30))
         fi
 
+        # Claim awareness: check if bead is claimed by another session
+        local claimed_by=""
+        local claimed_by_val
+        claimed_by_val=$(bd state "$id" claimed_by 2>/dev/null) || claimed_by_val=""
+        if [[ -n "$claimed_by_val" && "$claimed_by_val" != "(no claimed_by state set)" && "$claimed_by_val" != "${CLAUDE_SESSION_ID:-}" ]]; then
+            local claimed_at_val age_sec
+            claimed_at_val=$(bd state "$id" claimed_at 2>/dev/null) || claimed_at_val=""
+            if [[ -n "$claimed_at_val" && "$claimed_at_val" != "(no claimed_at state set)" ]]; then
+                age_sec=$(( $(date +%s) - claimed_at_val ))
+                if [[ $age_sec -lt 7200 ]]; then
+                    score=$((score - 50))
+                    claimed_by="${claimed_by_val:0:8}"
+                else
+                    # Stale claim — auto-release
+                    bd set-state "$id" "claimed_by=" >/dev/null 2>&1 || true
+                    bd set-state "$id" "claimed_at=" >/dev/null 2>&1 || true
+                fi
+            fi
+        fi
+
         # Append to results with phase and score fields
         results=$(echo "$results" | jq \
             --arg id "$id" \
@@ -345,7 +365,8 @@ discovery_scan_beads() {
             --arg phase "$phase" \
             --argjson score "${score:-0}" \
             --arg parent_closed_epic "${parent_closed_epic:-}" \
-            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale, phase: $phase, score: $score, parent_closed_epic: (if $parent_closed_epic == "" then null else $parent_closed_epic end)}]')
+            --arg claimed_by "${claimed_by}" \
+            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale, phase: $phase, score: $score, parent_closed_epic: (if $parent_closed_epic == "" then null else $parent_closed_epic end), claimed_by: (if $claimed_by == "" then null else $claimed_by end)}]')
 
         i=$((i + 1))
     done
