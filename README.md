@@ -12,6 +12,14 @@ Phase state is communicated to interline via sideband files at `~/.interband/int
 
 ## Installation
 
+First, add the [interagency marketplace](https://github.com/mistakeknot/interagency-marketplace) (one-time setup):
+
+```bash
+/plugin marketplace add mistakeknot/interagency-marketplace
+```
+
+Then install the plugin:
+
 ```bash
 /plugin install interphase
 ```
