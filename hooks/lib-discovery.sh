@@ -493,26 +493,18 @@ discovery_brief_scan() {
         return 0
     fi
 
-    # Cache path — unique per project directory
+    # Cache key — unique per project directory, stored in ic state with 60s TTL
     local cache_key="${project_dir//\//_}"
-    local cache_file="/tmp/clavain-discovery-brief-${cache_key}.cache"
 
-    # Check TTL (60 seconds)
-    if [[ -f "$cache_file" ]]; then
-        local cache_mtime now cache_age
-        cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null || echo 0)
-        now=$(date +%s)
-        cache_age=$(( now - cache_mtime ))
-        if [[ $cache_age -lt 60 && $cache_age -ge 0 ]]; then
-            # Cache is fresh — validate then return
-            local cached
-            cached=$(cat "$cache_file" 2>/dev/null) || cached=""
-            if [[ "$cached" == "NO_WORK" ]]; then
-                return 0  # Valid "no open beads" state
-            elif [[ -n "$cached" ]]; then
-                echo "$cached"
-                return 0
-            fi
+    # Check ic state cache (TTL is enforced by ic — expired entries return empty)
+    if type intercore_state_get &>/dev/null && intercore_available 2>/dev/null; then
+        local cached
+        cached=$(intercore_state_get "discovery_brief" "$cache_key" 2>/dev/null) || cached=""
+        if [[ "$cached" == "NO_WORK" ]]; then
+            return 0  # Valid "no open beads" state
+        elif [[ -n "$cached" ]]; then
+            echo "$cached"
+            return 0
         fi
     fi
 
@@ -542,8 +534,9 @@ discovery_brief_scan() {
 
     if [[ "$total_count" -eq 0 ]]; then
         # No open work — cache with sentinel so next call uses cache
-        local temp_cache="${cache_file}.$$"
-        echo "NO_WORK" > "$temp_cache" 2>/dev/null && mv -f "$temp_cache" "$cache_file" 2>/dev/null || true
+        if type intercore_state_set &>/dev/null && intercore_available 2>/dev/null; then
+            intercore_state_set "discovery_brief" "$cache_key" "NO_WORK" 2>/dev/null || true
+        fi
         return 0
     fi
 
@@ -582,9 +575,10 @@ discovery_brief_scan() {
         summary="${total_count} open beads. Top: ${top_action} ${top_id} — ${top_title} (P${top_priority})"
     fi
 
-    # Write to cache (atomic: temp file + rename prevents partial reads)
-    local temp_cache="${cache_file}.$$"
-    echo "$summary" > "$temp_cache" 2>/dev/null && mv -f "$temp_cache" "$cache_file" 2>/dev/null || true
+    # Write to ic state cache
+    if type intercore_state_set &>/dev/null && intercore_available 2>/dev/null; then
+        intercore_state_set "discovery_brief" "$cache_key" "$summary" 2>/dev/null || true
+    fi
 
     echo "$summary"
 }
