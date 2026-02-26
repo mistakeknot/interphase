@@ -4,7 +4,7 @@ Phase tracking and gate validation for the Beads issue tracker.
 
 ## What this does
 
-interphase adds lifecycle state management on top of beads: discovery, planning, building, review, shipping. Each phase has gates that should be satisfied before moving to the next one. The key word is "should": interphase tracks and reports but never blocks. It's observability, not enforcement.
+interphase adds lifecycle state management on top of beads: discovery, planning, building, review, shipping. Each phase has gates that should be satisfied before moving to the next one. By default, interphase tracks and reports without blocking (observability-first). An opt-in strict mode can fail closed for high-risk transitions.
 
 The libraries (`lib-phase.sh`, `lib-gates.sh`, `lib-discovery.sh`) are sourced by consuming plugins like Clavain rather than running as standalone hooks. This keeps the hook budget lean while still making phase awareness available everywhere it's needed.
 
@@ -48,4 +48,14 @@ skills/
 tests/               Bats shell tests
 ```
 
-All functions are fail-safe: return 0 on error, never block the workflow. A stuck interphase should be invisible, not catastrophic.
+By default, functions are fail-safe: return 0 on dependency/error paths and avoid blocking workflow. In strict mode, hard-tier transitions can intentionally fail closed.
+
+## Strict Mode (Opt-In)
+
+interphase supports an opt-in strict gate mode for high-risk transitions:
+
+- Set `CLAVAIN_GATE_FAIL_CLOSED=true` to enable strict behavior.
+- Strict mode applies to hard-tier beads only (`P0`/`P1`).
+- In strict mode, dependency or malformed-input errors fail closed instead of failing open.
+- `CLAVAIN_SKIP_GATE="reason"` remains available as an emergency override and is explicitly audited.
+- `CLAVAIN_DISABLE_GATES=true` still bypasses all gate enforcement.

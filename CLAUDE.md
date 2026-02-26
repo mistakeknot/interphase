@@ -30,11 +30,17 @@ python3 -c "import json; json.load(open('.claude-plugin/plugin.json'))"
 
 ## Configuration
 
-interphase has no user-facing configuration. Visible output (statusline colors, labels, layers) is configured via the **interline** companion plugin (`~/.claude/interline.json`). The integration contract between interphase and interline is the sideband bead payload (`id`, `phase`, `reason`, `ts`) carried in `~/.interband/interphase/bead/${session_id}.json` (with legacy `/tmp/clavain-bead-${session_id}.json` fallback).
+interphase uses env-based gate controls:
+
+- `CLAVAIN_GATE_FAIL_CLOSED=true` enables strict fail-closed behavior for hard-tier (`P0`/`P1`) transitions.
+- `CLAVAIN_SKIP_GATE="reason"` bypasses hard/strict blocks with explicit audit trail.
+- `CLAVAIN_DISABLE_GATES=true` bypasses all gate enforcement.
+
+Visible output (statusline colors, labels, layers) is configured via the **interline** companion plugin (`~/.claude/interline.json`). The integration contract between interphase and interline is the sideband bead payload (`id`, `phase`, `reason`, `ts`) carried in `~/.interband/interphase/bead/${session_id}.json` (with legacy `/tmp/clavain-bead-${session_id}.json` fallback).
 
 ## Design Decisions
 
 - Libraries are sourced by consuming plugins (e.g., Clavain) via shim delegation
-- All functions are fail-safe: return 0 on error, never block workflow
-- Phase tracking is observability only — functions never enforce or block
+- Legacy mode is fail-safe/fail-open for dependency errors
+- Strict mode is opt-in and fail-closed for hard-tier dependency/malformed-input errors
 - Discovery scanner outputs structured JSON for programmatic consumption

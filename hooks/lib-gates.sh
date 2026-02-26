@@ -4,7 +4,9 @@
 # tiered enforcement (F7), and stale review detection.
 #
 # Sources lib-phase.sh internally (reuses phase_set, phase_get, CLAVAIN_PHASES).
-# All public functions are fail-safe: return 0 on error, never block workflow.
+# Public functions are fail-safe by default (legacy mode). In strict mode
+# (CLAVAIN_GATE_FAIL_CLOSED=true), hard-tier transitions (P0/P1) fail closed on
+# dependency and malformed-input errors.
 # Set CLAVAIN_DISABLE_GATES=true to bypass all enforcement (emergency escape hatch).
 
 # Guard against double-sourcing
@@ -18,7 +20,7 @@ _GATES_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PHASE_PROJECT_DIR="$GATES_PROJECT_DIR"; source "${_GATES_SCRIPT_DIR}/lib-phase.sh"
 
 # Optional shared sideband protocol library.
-# Fail-open: interphase keeps legacy behavior when interband is unavailable.
+# Legacy mode is fail-open when interband is unavailable.
 _gate_load_interband() {
     [[ "${_GATE_INTERBAND_LOADED:-0}" -eq 1 ]] && return 0
 
@@ -130,6 +132,44 @@ check_phase_gate() {
 
 # ─── Enforcement (F7) ──────────────────────────────────────────────
 
+# Strict mode toggle.
+_gate_strict_enabled() {
+    [[ "${CLAVAIN_GATE_FAIL_CLOSED:-false}" == "true" ]]
+}
+
+# Resolve tier with structured errors.
+# Output format: "<tier>|<error_class>|<error_reason>"
+# error_class values: transient|permanent|"".
+_gate_resolve_enforcement_tier() {
+    local bead_id="${1:-}"
+    if [[ -z "$bead_id" ]]; then
+        echo "none||missing_bead_id"
+        return 0
+    fi
+
+    local bead_json
+    bead_json=$(bd show "$bead_id" --json 2>/dev/null) || {
+        echo "none|transient|bd_show_failed"
+        return 1
+    }
+
+    local priority
+    priority=$(echo "$bead_json" | jq -er '.priority // 4' 2>/dev/null) || {
+        echo "none|permanent|priority_json_parse_error"
+        return 1
+    }
+    if [[ ! "$priority" =~ ^[0-9]+$ ]]; then
+        echo "none|permanent|priority_not_integer"
+        return 1
+    fi
+
+    case "$priority" in
+        0|1) echo "hard||" ;;
+        2|3) echo "soft||" ;;
+        *)   echo "none||" ;;
+    esac
+}
+
 # Get the enforcement tier for a bead based on its priority.
 # Returns: hard (P0/P1), soft (P2/P3), or none (P4+)
 #
@@ -137,21 +177,11 @@ check_phase_gate() {
 # Output: tier string to stdout
 get_enforcement_tier() {
     local bead_id="${1:-}"
-
-    if [[ -z "$bead_id" ]]; then
-        echo "none"
-        return 0
-    fi
-
-    local priority
-    priority=$(bd show "$bead_id" --json 2>/dev/null | jq -r '.priority // 4' 2>/dev/null) || priority=4
-    [[ "$priority" == "null" || -z "$priority" ]] && priority=4
-
-    case "$priority" in
-        0|1) echo "hard" ;;
-        2|3) echo "soft" ;;
-        *)   echo "none" ;;
-    esac
+    local resolved tier
+    resolved=$(_gate_resolve_enforcement_tier "$bead_id" 2>/dev/null) || true
+    IFS='|' read -r tier _ _ <<< "$resolved"
+    [[ -z "$tier" ]] && tier="none"
+    echo "$tier"
 }
 
 # Check if a flux-drive review for an artifact is stale.
@@ -162,8 +192,12 @@ get_enforcement_tier() {
 check_review_staleness() {
     local bead_id="${1:-}"
     local artifact_path="${2:-}"
+    _GATES_LAST_REVIEW_ERROR_CLASS=""
+    _GATES_LAST_REVIEW_ERROR_REASON=""
+    _GATES_LAST_REVIEW_STALENESS="none"
 
     if [[ -z "$artifact_path" ]]; then
+        _GATES_LAST_REVIEW_STALENESS="none"
         echo "none"
         return 0
     fi
@@ -172,6 +206,7 @@ check_review_staleness() {
     local research_dir="${project_dir}/docs/research/flux-drive"
 
     if [[ ! -d "$research_dir" ]]; then
+        _GATES_LAST_REVIEW_STALENESS="none"
         echo "none"
         return 0
     fi
@@ -197,17 +232,24 @@ check_review_staleness() {
     done < <(find "$research_dir" -name 'findings.json' -print0 2>/dev/null)
 
     if [[ -z "$findings_file" ]]; then
+        _GATES_LAST_REVIEW_STALENESS="none"
         echo "none"
         return 0
     fi
 
     # Read reviewed timestamp
     reviewed_date=$(jq -r '.reviewed // ""' "$findings_file" 2>/dev/null) || {
+        _GATES_LAST_REVIEW_ERROR_CLASS="permanent"
+        _GATES_LAST_REVIEW_ERROR_REASON="review_metadata_malformed"
+        _GATES_LAST_REVIEW_STALENESS="unknown"
         echo "unknown"
         return 0
     }
 
     if [[ -z "$reviewed_date" || "$reviewed_date" == "null" ]]; then
+        _GATES_LAST_REVIEW_ERROR_CLASS="permanent"
+        _GATES_LAST_REVIEW_ERROR_REASON="review_timestamp_missing"
+        _GATES_LAST_REVIEW_STALENESS="unknown"
         echo "unknown"
         return 0
     fi
@@ -216,16 +258,81 @@ check_review_staleness() {
     if [[ -n "$artifact_path" && -f "${project_dir}/${artifact_path}" ]]; then
         local commits_after
         commits_after=$(cd "$project_dir" && git log --oneline --since="$reviewed_date" -- "$artifact_path" 2>/dev/null | head -1) || {
+            _GATES_LAST_REVIEW_ERROR_CLASS="transient"
+            _GATES_LAST_REVIEW_ERROR_REASON="git_log_failed"
+            _GATES_LAST_REVIEW_STALENESS="unknown"
             echo "unknown"
             return 0
         }
         if [[ -n "$commits_after" ]]; then
+            _GATES_LAST_REVIEW_STALENESS="stale"
             echo "stale"
             return 0
         fi
     fi
 
+    _GATES_LAST_REVIEW_STALENESS="fresh"
     echo "fresh"
+}
+
+_gate_check_interband_dependency() {
+    _GATE_DEP_ERROR_CLASS=""
+    _GATE_DEP_ERROR_REASON=""
+
+    # No session means no sideband target requirement.
+    if [[ -z "${CLAUDE_SESSION_ID:-}" ]]; then
+        return 0
+    fi
+
+    if _gate_load_interband && type interband_path >/dev/null 2>&1 && type interband_write >/dev/null 2>&1; then
+        return 0
+    fi
+
+    _GATE_DEP_ERROR_CLASS="transient"
+    _GATE_DEP_ERROR_REASON="interband_unavailable"
+    return 1
+}
+
+_gate_retry_transient_dependency() {
+    local check_fn="${1:-}"
+    local attempts=3
+    local attempt=1
+    [[ -z "$check_fn" ]] && return 1
+
+    while [[ $attempt -le $attempts ]]; do
+        if "$check_fn"; then
+            return 0
+        fi
+        if [[ "${_GATE_DEP_ERROR_CLASS:-}" != "transient" ]]; then
+            return 1
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
+_gate_strict_fail_or_skip() {
+    local bead_id="${1:-}"
+    local target="${2:-}"
+    local tier="${3:-hard}"
+    local error_class="${4:-permanent}"
+    local error_reason="${5:-strict_dependency_failed}"
+    local skip_reason="${6:-}"
+
+    if [[ -n "$skip_reason" ]]; then
+        local audit_entry="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Strict gate skipped: $target (class=$error_class, reason: $error_reason, override: $skip_reason)"
+        bd update "$bead_id" --append-notes "$audit_entry" 2>/dev/null || {
+            echo "WARNING: failed to write strict skip-gate audit entry for $bead_id" >&2
+        }
+        _gate_log_enforcement "$bead_id" "?" "$tier" "skip-strict-override" "class=$error_class reason=$error_reason override=$skip_reason"
+        return 0
+    fi
+
+    echo "ERROR: strict gate blocked $target for $bead_id (tier=$tier, class=$error_class, reason=$error_reason)" >&2
+    echo "  Set CLAVAIN_SKIP_GATE=\"reason\" to override strict block." >&2
+    _gate_log_enforcement "$bead_id" "?" "$tier" "block-strict-$error_class" "$error_reason"
+    return 1
 }
 
 # Enforce a phase gate with priority-based tiering.
@@ -255,14 +362,41 @@ enforce_gate() {
         return 0
     fi
 
-    # Get enforcement tier
-    local tier
-    tier=$(get_enforcement_tier "$bead_id" 2>/dev/null) || tier="none"
+    # Resolve enforcement tier with detailed error classification.
+    local resolved tier tier_error_class tier_error_reason
+    resolved=$(_gate_resolve_enforcement_tier "$bead_id" 2>/dev/null) || true
+    IFS='|' read -r tier tier_error_class tier_error_reason <<< "$resolved"
+    [[ -z "$tier" ]] && tier="none"
+
+    local strict_mode="false"
+    if _gate_strict_enabled && [[ "$tier" == "hard" || -n "$tier_error_class" ]]; then
+        strict_mode="true"
+    fi
+
+    # Fail closed on tier resolution errors in strict mode.
+    if [[ -n "$tier_error_class" ]]; then
+        if [[ "$strict_mode" == "true" ]]; then
+            _gate_strict_fail_or_skip "$bead_id" "$target" "hard" "$tier_error_class" "$tier_error_reason" "$skip_reason"
+            return $?
+        fi
+        tier="none"
+    fi
 
     # No-gate tier: skip entirely
     if [[ "$tier" == "none" ]]; then
         _gate_log_enforcement "$bead_id" "?" "$tier" "pass-no-gate" ""
         return 0
+    fi
+
+    # Strict mode: ensure interband dependency is available for hard-tier transitions.
+    if [[ "$strict_mode" == "true" ]]; then
+        if ! _gate_retry_transient_dependency _gate_check_interband_dependency; then
+            _gate_strict_fail_or_skip \
+                "$bead_id" "$target" "$tier" \
+                "${_GATE_DEP_ERROR_CLASS:-transient}" "${_GATE_DEP_ERROR_REASON:-dependency_check_failed}" \
+                "$skip_reason"
+            return $?
+        fi
     fi
 
     # Check phase gate
@@ -275,7 +409,15 @@ enforce_gate() {
     # Invalid transition — check staleness
     local staleness="unknown"
     if [[ -n "$artifact_path" ]]; then
-        staleness=$(check_review_staleness "$bead_id" "$artifact_path" 2>/dev/null) || staleness="unknown"
+        check_review_staleness "$bead_id" "$artifact_path" >/dev/null 2>/dev/null || true
+        staleness="${_GATES_LAST_REVIEW_STALENESS:-unknown}"
+    fi
+    if [[ "$strict_mode" == "true" && "$staleness" == "unknown" && -n "${_GATES_LAST_REVIEW_ERROR_CLASS:-}" ]]; then
+        _gate_strict_fail_or_skip \
+            "$bead_id" "$target" "$tier" \
+            "$_GATES_LAST_REVIEW_ERROR_CLASS" "$_GATES_LAST_REVIEW_ERROR_REASON" \
+            "$skip_reason"
+        return $?
     fi
 
     # Handle by tier

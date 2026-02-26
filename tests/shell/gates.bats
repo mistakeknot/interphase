@@ -16,12 +16,14 @@ setup() {
     unset _GATES_LOADED
     unset _PHASE_LOADED
     source "$HOOKS_DIR/lib-gates.sh"
+    mock_interband_available
 
     # Default mock: bd available, no phase set
     mock_bd_no_phase
 }
 
 teardown() {
+    unset INTERBAND_LIB CLAVAIN_GATE_FAIL_CLOSED CLAVAIN_SKIP_GATE CLAVAIN_DISABLE_GATES CLAUDE_SESSION_ID
     rm -rf "$TEST_PROJECT"
 }
 
@@ -68,6 +70,70 @@ mock_bd_unavailable() {
     unset _GATES_LOADED _PHASE_LOADED
     source "$HOOKS_DIR/lib-gates.sh"
     export PATH="$old_path"
+}
+
+# Mock interband helper script and point INTERBAND_LIB to it.
+mock_interband_available() {
+    local script="$TEST_PROJECT/mock-interband.sh"
+    cat > "$script" <<'EOF'
+interband_path() {
+    local namespace="$1"
+    local channel="$2"
+    local key="$3"
+    echo "${HOME}/.interband/${namespace}/${channel}/${key}.json"
+}
+
+interband_write() {
+    local filepath="$1"
+    local namespace="$2"
+    local type="$3"
+    local key="$4"
+    local payload="$5"
+    mkdir -p "$(dirname "$filepath")"
+    jq -n -c \
+        --arg ns "$namespace" \
+        --arg ty "$type" \
+        --arg key "$key" \
+        --argjson payload "$payload" \
+        '{version:"1.0", namespace:$ns, type:$ty, key:$key, payload:$payload}' \
+        > "$filepath"
+}
+
+interband_prune_channel() { return 0; }
+EOF
+    chmod +x "$script"
+    export INTERBAND_LIB="$script"
+    unset _GATE_INTERBAND_LOADED
+    unset -f interband_path interband_write interband_prune_channel 2>/dev/null || true
+}
+
+mock_interband_unavailable() {
+    export INTERBAND_LIB="$TEST_PROJECT/does-not-exist.sh"
+    unset _GATE_INTERBAND_LOADED
+    unset -f interband_path interband_write interband_prune_channel 2>/dev/null || true
+}
+
+# Flaky transient dependency mock for retry-path validation.
+mock_interband_flaky() {
+    local initial_failures="${1:-1}"
+    export MOCK_INTERBAND_FAILS_REMAINING="$initial_failures"
+    export MOCK_INTERBAND_ATTEMPTS_FILE="$TEST_PROJECT/interband-attempts.log"
+    : > "$MOCK_INTERBAND_ATTEMPTS_FILE"
+
+    _gate_check_interband_dependency() {
+        echo "attempt" >> "$MOCK_INTERBAND_ATTEMPTS_FILE"
+        local remaining="${MOCK_INTERBAND_FAILS_REMAINING:-0}"
+        if [[ "$remaining" -gt 0 ]]; then
+            export MOCK_INTERBAND_FAILS_REMAINING=$((remaining - 1))
+            _GATE_DEP_ERROR_CLASS="transient"
+            _GATE_DEP_ERROR_REASON="interband_unavailable"
+            return 1
+        fi
+        _GATE_DEP_ERROR_CLASS=""
+        _GATE_DEP_ERROR_REASON=""
+        return 0
+    }
+    export -f _gate_check_interband_dependency
 }
 
 # ─── Source & init ────────────────────────────────────────────────────
@@ -741,6 +807,202 @@ mock_bd_enforce() {
     export -f bd
     run enforce_gate "Test-001" "brainstorm"
     assert_success
+}
+
+@test "enforce_gate strict: valid hard-tier transition passes when dependencies are healthy" {
+    mock_interband_available
+    mock_bd_enforce "brainstorm" 0
+    export CLAUDE_SESSION_ID="strict-valid-deps"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_success
+}
+
+@test "enforce_gate strict: hard-tier transition blocks when interband is unavailable" {
+    mock_interband_unavailable
+    mock_bd_enforce "brainstorm" 0
+    export CLAUDE_SESSION_ID="strict-interband-down"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_failure
+    assert_output --partial "strict gate blocked"
+    assert_output --partial "class=transient"
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "block-strict-transient" ]]
+}
+
+@test "enforce_gate strict: CLAVAIN_SKIP_GATE overrides dependency block with strict audit" {
+    mock_interband_unavailable
+    mock_bd_enforce "brainstorm" 0
+    export CLAUDE_SESSION_ID="strict-override"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+    export CLAVAIN_SKIP_GATE="Interband outage override"
+
+    enforce_gate "Test-001" "brainstorm-reviewed" 2>/dev/null
+    [[ "$?" -eq 0 ]]
+    [[ "$MOCK_BD_NOTES" == *"Strict gate skipped"* ]]
+    [[ "$MOCK_BD_NOTES" == *"Interband outage override"* ]]
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "skip-strict-override" ]]
+}
+
+@test "enforce_gate strict: malformed priority input blocks as permanent error" {
+    mock_interband_available
+    bd() {
+        case "$1" in
+            state) echo "brainstorm"; return 0 ;;
+            set-state) return 0 ;;
+            show) echo '{"id":"Test-001","priority":'; return 0 ;;
+            update) return 0 ;;
+        esac
+        return 1
+    }
+    export -f bd
+
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_failure
+    assert_output --partial "class=permanent"
+    assert_output --partial "priority_json_parse_error"
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "block-strict-permanent" ]]
+}
+
+@test "enforce_gate strict: retries transient dependency failure and recovers" {
+    mock_bd_enforce "brainstorm" 0
+    mock_interband_flaky 2
+    export CLAUDE_SESSION_ID="strict-retry"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_success
+
+    local attempts
+    attempts=$(wc -l < "$MOCK_INTERBAND_ATTEMPTS_FILE")
+    [[ "$attempts" -eq 3 ]]
+}
+
+@test "enforce_gate strict: soft tier remains legacy even when strict mode is enabled" {
+    mock_interband_unavailable
+    mock_bd_enforce "brainstorm" 2
+    export CLAUDE_SESSION_ID="strict-soft-legacy"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+    run enforce_gate "Test-001" "shipping"
+    assert_success
+    assert_output --partial "tier=soft"
+}
+
+@test "enforce_gate strict: hard-tier invalid transition still blocks after dependency checks pass" {
+    mock_interband_available
+    mock_bd_enforce "brainstorm" 0
+    export CLAUDE_SESSION_ID="strict-hard-invalid"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+
+    run enforce_gate "Test-001" "shipping"
+    assert_failure
+    assert_output --partial "ERROR: phase gate blocked"
+    assert_output --partial "tier=hard"
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "block" ]]
+}
+
+@test "enforce_gate strict: tier resolution failure blocks as transient" {
+    mock_interband_available
+    bd() {
+        case "$1" in
+            state) echo "brainstorm"; return 0 ;;
+            set-state) return 0 ;;
+            show) return 127 ;;
+            update) return 0 ;;
+        esac
+        return 1
+    }
+    export -f bd
+
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_failure
+    assert_output --partial "class=transient"
+    assert_output --partial "bd_show_failed"
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "block-strict-transient" ]]
+}
+
+@test "enforce_gate strict: stale-review unknown path blocks as permanent" {
+    mock_interband_available
+    mock_bd_enforce "brainstorm" 0
+    export CLAUDE_SESSION_ID="strict-staleness-unknown"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+
+    mkdir -p "$TEST_PROJECT/docs/plans"
+    echo "# Plan" > "$TEST_PROJECT/docs/plans/test.md"
+
+    mkdir -p "$TEST_PROJECT/docs/research/flux-drive/review-bad"
+    echo '{"bead_id":"Test-001","input":"docs/plans/test.md"}' \
+        > "$TEST_PROJECT/docs/research/flux-drive/review-bad/findings.json"
+
+    run enforce_gate "Test-001" "shipping" "docs/plans/test.md"
+    assert_failure
+    assert_output --partial "class=permanent"
+    assert_output --partial "review_timestamp_missing"
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "block-strict-permanent" ]]
+}
+
+@test "enforce_gate strict: retry exhaustion blocks after final transient failure" {
+    mock_bd_enforce "brainstorm" 0
+    mock_interband_flaky 3
+    export CLAUDE_SESSION_ID="strict-retry-exhaustion"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_failure
+    assert_output --partial "strict gate blocked"
+    assert_output --partial "class=transient"
+
+    local attempts
+    attempts=$(wc -l < "$MOCK_INTERBAND_ATTEMPTS_FILE")
+    [[ "$attempts" -eq 3 ]]
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "block-strict-transient" ]]
+}
+
+@test "enforce_gate strict: CLAVAIN_DISABLE_GATES bypasses strict blocking paths" {
+    mock_interband_unavailable
+    mock_bd_enforce "brainstorm" 0
+    export CLAUDE_SESSION_ID="strict-disabled"
+    export CLAVAIN_GATE_FAIL_CLOSED=true
+    export CLAVAIN_DISABLE_GATES=true
+
+    run enforce_gate "Test-001" "brainstorm-reviewed"
+    assert_success
+    assert_output --partial "WARNING: gate enforcement DISABLED"
+
+    local file="$TEST_PROJECT/.clavain/telemetry.jsonl"
+    local enforce_line
+    enforce_line=$(grep '"gate_enforce"' "$file" | tail -1)
+    [[ $(echo "$enforce_line" | jq -r '.decision') == "bypass" ]]
 }
 
 # ─── enforce_gate: telemetry ─────────────────────────────────────────
