@@ -333,6 +333,11 @@ discovery_scan_beads() {
             score=$((score - 30))
         fi
 
+        # Interject-originated beads without human touch rank lower
+        if [[ "$title" == "[interject]"* ]] && [[ -z "$phase" ]]; then
+            score=$((score - 15))
+        fi
+
         # Claim awareness: check if bead is claimed by another session
         local claimed_by=""
         local claimed_by_val
@@ -342,7 +347,7 @@ discovery_scan_beads() {
             claimed_at_val=$(bd state "$id" claimed_at 2>/dev/null) || claimed_at_val=""
             if [[ -n "$claimed_at_val" && "$claimed_at_val" != "(no claimed_at state set)" ]]; then
                 age_sec=$(( $(date +%s) - claimed_at_val ))
-                if [[ $age_sec -lt 7200 ]]; then
+                if [[ $age_sec -lt 2700 ]]; then
                     score=$((score - 50))
                     claimed_by="${claimed_by_val:0:8}"
                 else
