@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Show in-progress beads grouped by assignee
+set -euo pipefail
+
+command -v bd &>/dev/null || { echo "bd not found" >&2; exit 1; }
+command -v jq &>/dev/null || { echo "jq not found" >&2; exit 1; }
+
+ip_json=$(timeout 10 bd list --status=in_progress --json 2>/dev/null) || ip_json="[]"
+count=$(echo "$ip_json" | jq 'length')
+
+if [[ "$count" -eq 0 ]]; then
+    echo "No in-progress beads."
+    exit 0
+fi
+
+echo "$ip_json" | jq -r '
+    group_by(.assignee // "unclaimed") | .[] |
+    "  \(.[0].assignee // "unclaimed") (\(length) beads)" as $header |
+    [$header] + [.[] | "    \u25d0 \(.id) [\(.priority // "?")] \(.title)"] |
+    .[]
+'

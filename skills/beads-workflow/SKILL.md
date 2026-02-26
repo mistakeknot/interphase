@@ -57,8 +57,8 @@ bd create --title="Token refresh logic" --parent=bd-a3f8.1 --priority=2
 
 ### Updating Issues
 ```bash
-bd update <id> --status=in_progress    # Claim work
-bd update <id> --claim                 # Atomically assign + mark in-progress
+bd update <id> --claim                 # Atomically claim (fails if already claimed)
+bd update <id> --status=in_progress    # Soft claim (no collision detection — prefer --claim)
 bd update <id> --assignee=username     # Assign
 bd close <id>                          # Mark complete
 bd close <id1> <id2> ...              # Close multiple at once
