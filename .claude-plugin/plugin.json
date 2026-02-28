@@ -15,7 +15,6 @@
     "workflow",
     "issue-tracking"
   ],
-  "hooks": "./hooks/hooks.json",
   "skills": [
     "./skills/beads-workflow"
   ]
