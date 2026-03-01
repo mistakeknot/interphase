@@ -342,18 +342,22 @@ discovery_scan_beads() {
         local claimed_by=""
         local claimed_by_val
         claimed_by_val=$(bd state "$id" claimed_by 2>/dev/null) || claimed_by_val=""
-        if [[ -n "$claimed_by_val" && "$claimed_by_val" != "(no claimed_by state set)" && "$claimed_by_val" != "${CLAUDE_SESSION_ID:-}" ]]; then
+        if [[ -n "$claimed_by_val" \
+            && "$claimed_by_val" != "(no claimed_by state set)" \
+            && "$claimed_by_val" != "released" \
+            && "$claimed_by_val" != "unknown" \
+            && "$claimed_by_val" != "${CLAUDE_SESSION_ID:-}" ]]; then
             local claimed_at_val age_sec
             claimed_at_val=$(bd state "$id" claimed_at 2>/dev/null) || claimed_at_val=""
-            if [[ -n "$claimed_at_val" && "$claimed_at_val" != "(no claimed_at state set)" ]]; then
+            if [[ -n "$claimed_at_val" && "$claimed_at_val" != "(no claimed_at state set)" && "$claimed_at_val" != "0" ]]; then
                 age_sec=$(( $(date +%s) - claimed_at_val ))
                 if [[ $age_sec -lt 2700 ]]; then
                     score=$((score - 50))
                     claimed_by="${claimed_by_val:0:8}"
                 else
-                    # Stale claim — auto-release
-                    bd set-state "$id" "claimed_by=" >/dev/null 2>&1 || true
-                    bd set-state "$id" "claimed_at=" >/dev/null 2>&1 || true
+                    # Stale claim — auto-release with sentinel values
+                    bd set-state "$id" "claimed_by=released" >/dev/null 2>&1 || true
+                    bd set-state "$id" "claimed_at=0" >/dev/null 2>&1 || true
                 fi
             fi
         fi
