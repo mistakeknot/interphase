@@ -9,10 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install bats
+      - name: Install bats and helpers
         run: |
           git clone --depth 1 https://github.com/bats-core/bats-core.git /tmp/bats
           sudo /tmp/bats/install.sh /usr/local
+          sudo npm install -g bats-support bats-assert
       - name: Shellcheck
         run: |
           shellcheck hooks/*.sh || true
