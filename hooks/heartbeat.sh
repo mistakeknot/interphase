@@ -2,6 +2,11 @@
 # PostToolUse heartbeat — refresh claim timestamp at most once per 60s
 # Uses temp file mtime for throttle (reliable across concurrent hooks)
 
+# Discover bead ID: env var (set by route/CLAUDE_ENV_FILE) or marker file (set by autoclaim)
+if [[ -z "${CLAVAIN_BEAD_ID:-}" ]]; then
+    _marker="/tmp/interphase-bead-${CLAUDE_SESSION_ID:-unknown}"
+    [[ -f "$_marker" ]] && CLAVAIN_BEAD_ID=$(cat "$_marker" 2>/dev/null) || true
+fi
 [[ -n "${CLAVAIN_BEAD_ID:-}" ]] || exit 0
 command -v bd &>/dev/null || exit 0
 

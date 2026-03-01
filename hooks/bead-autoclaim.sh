@@ -43,8 +43,13 @@ fi
 SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
 
 # Collision check — don't stomp another session's active claim
+# Sentinel "released" and "unknown" are treated as unclaimed
 EXISTING_CLAIMER=$(bd state "$ISSUE_ID" claimed_by 2>/dev/null) || EXISTING_CLAIMER=""
-if [[ -n "$EXISTING_CLAIMER" && "$EXISTING_CLAIMER" != "(no claimed_by state set)" && "$EXISTING_CLAIMER" != "$SESSION_ID" ]]; then
+if [[ -n "$EXISTING_CLAIMER" \
+    && "$EXISTING_CLAIMER" != "(no claimed_by state set)" \
+    && "$EXISTING_CLAIMER" != "released" \
+    && "$EXISTING_CLAIMER" != "unknown" \
+    && "$EXISTING_CLAIMER" != "$SESSION_ID" ]]; then
     # Check if the existing claim is still fresh (within 45 min)
     EXISTING_TS=$(bd state "$ISSUE_ID" claimed_at 2>/dev/null) || EXISTING_TS=""
     if [[ -n "$EXISTING_TS" && "$EXISTING_TS" != "(no claimed_at state set)" ]]; then
@@ -64,9 +69,12 @@ fi
 bd set-state "$ISSUE_ID" "claimed_by=$SESSION_ID" >/dev/null 2>&1 || true
 bd set-state "$ISSUE_ID" "claimed_at=$(date +%s)" >/dev/null 2>&1 || true
 
-# Export CLAVAIN_BEAD_ID so heartbeat + session-end-release activate
+# Activate CLAVAIN_BEAD_ID for heartbeat + session-end-release hooks.
+# Primary: CLAUDE_ENV_FILE (Claude Code sources this between tool calls).
+# Fallback: temp marker file that sibling hooks can discover.
 if [[ -n "${CLAUDE_ENV_FILE:-}" ]]; then
     echo "export CLAVAIN_BEAD_ID=${ISSUE_ID}" >> "$CLAUDE_ENV_FILE"
 fi
+echo "$ISSUE_ID" > "/tmp/interphase-bead-${SESSION_ID}" 2>/dev/null || true
 
 exit 0
