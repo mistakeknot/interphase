@@ -31,7 +31,8 @@ EXIT_CODE=$(echo "$INPUT" | jq -r '.tool_result.exit_code // ""' 2>/dev/null) ||
 [[ "$EXIT_CODE" == "0" || -z "$EXIT_CODE" ]] || exit 0
 
 # Extract issue ID from the command (first argument after bd update/claim)
-ISSUE_ID=$(echo "$COMMAND" | grep -oP '(?<=bd (?:update|claim) )\S+' 2>/dev/null) || exit 0
+# Note: separate lookbehinds required — PCRE rejects variable-length (?:update|claim)
+ISSUE_ID=$(echo "$COMMAND" | grep -oP '(?<=bd update |bd claim )\S+' 2>/dev/null) || exit 0
 [[ -n "$ISSUE_ID" ]] || exit 0
 
 # If CLAVAIN_BEAD_ID already matches this bead, nothing to do (idempotent)
