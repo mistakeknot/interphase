@@ -931,3 +931,141 @@ mock_bd_with_closed_parent() {
     action=$(echo "$output" | jq -r '.[0].action')
     [[ "$action" != "verify_done" ]]
 }
+
+# ─── Interject Metadata Extraction ─────────────────────────────────
+
+# Mock bd that handles show --json for interject beads
+mock_bd_interject() {
+    local open_json="$1"
+    local show_json="$2"
+    export MOCK_BD_JSON="$open_json"
+    export MOCK_BD_SHOW_JSON="$show_json"
+    bd() {
+        if [[ "$1" == "list" ]]; then
+            if [[ "$*" == *"--status=in_progress"* ]]; then
+                echo '[]'
+            elif [[ "$*" == *"--type=epic"*"--status=closed"* ]] || [[ "$*" == *"--status=closed"*"--type=epic"* ]]; then
+                echo '[]'
+            else
+                echo "$MOCK_BD_JSON"
+            fi
+            return 0
+        fi
+        if [[ "$1" == "show" && "$*" == *"--json"* ]]; then
+            echo "$MOCK_BD_SHOW_JSON"
+            return 0
+        fi
+        if [[ "$1" == "state" ]]; then
+            echo "(no $3 state set)"
+            return 0
+        fi
+        return 1
+    }
+    export -f bd
+}
+
+@test "_extract_interject_metadata: parses source and score" {
+    bd() {
+        if [[ "$1" == "show" && "$*" == *"--json"* ]]; then
+            echo '{"id":"iv-t1","title":"[interject] Cool paper","description":"Source: arxiv | https://arxiv.org/abs/1234\n\nSome summary\n\nRelevance score: 0.85\nDiscovered: 2026-03-05"}'
+        fi
+        return 0
+    }
+    export -f bd
+
+    run _extract_interject_metadata "iv-t1"
+    assert_success
+    [[ "$output" == "arxiv|0.85" ]]
+}
+
+@test "_extract_interject_metadata: returns empty for non-matching desc" {
+    bd() {
+        if [[ "$1" == "show" && "$*" == *"--json"* ]]; then
+            echo '{"id":"iv-t2","title":"Normal bead","description":"Just a task"}'
+        fi
+        return 0
+    }
+    export -f bd
+
+    run _extract_interject_metadata "iv-t2"
+    assert_success
+    [[ "$output" == "|" ]]
+}
+
+@test "_extract_interject_metadata: handles bd failure gracefully" {
+    bd() { return 1; }
+    export -f bd
+
+    run _extract_interject_metadata "iv-t3"
+    assert_success
+    [[ "$output" == "|" ]]
+}
+
+@test "infer_bead_action: unphased interject bead returns review_discovery" {
+    bd() {
+        if [[ "$1" == "show" && "$*" == *"--json"* ]]; then
+            echo '{"id":"iv-t4","title":"[interject] GitHub repo","description":"Source: github | url"}'
+        fi
+        return 0
+    }
+    export -f bd
+    phase_get() { echo ""; }
+    export -f phase_get
+
+    run infer_bead_action "iv-t4" "open"
+    assert_success
+    [[ "$output" == "review_discovery|" ]]
+}
+
+@test "infer_bead_action: phased interject bead uses normal phase routing" {
+    bd() {
+        if [[ "$1" == "show" && "$*" == *"--json"* ]]; then
+            echo '{"id":"iv-t5","title":"[interject] Paper","description":"Source: arxiv | url"}'
+        fi
+        return 0
+    }
+    export -f bd
+    phase_get() { echo "brainstorm"; }
+    export -f phase_get
+
+    run infer_bead_action "iv-t5" "open"
+    assert_success
+    [[ "$output" == "strategize|"* ]]
+}
+
+@test "discovery: interject bead includes discovery_source and discovery_score" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd_interject \
+        "[{\"id\":\"iv-ij1\",\"title\":\"[interject] MCP framework\",\"status\":\"open\",\"priority\":4,\"updated_at\":\"${recent_iso}\"}]" \
+        '{"id":"iv-ij1","title":"[interject] MCP framework","description":"Source: github | https://github.com/foo\n\nA framework\n\nRelevance score: 0.82\nDiscovered: 2026-03-05","status":"open","priority":4}'
+
+    run discovery_scan_beads
+    assert_success
+
+    local ds dd action
+    ds=$(echo "$output" | jq -r '.[0].discovery_source')
+    dd=$(echo "$output" | jq -r '.[0].discovery_score')
+    action=$(echo "$output" | jq -r '.[0].action')
+    [[ "$ds" == "github" ]]
+    [[ "$dd" == "0.82" ]]
+    [[ "$action" == "review_discovery" ]]
+}
+
+@test "discovery: non-interject bead has null discovery fields" {
+    local recent_iso
+    recent_iso=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-1H +%Y-%m-%dT%H:%M:%SZ)
+
+    mock_bd \
+        "[{\"id\":\"Test-norm\",\"title\":\"Normal task\",\"status\":\"open\",\"priority\":2,\"updated_at\":\"${recent_iso}\"}]"
+
+    run discovery_scan_beads
+    assert_success
+
+    local ds dd
+    ds=$(echo "$output" | jq -r '.[0].discovery_source')
+    dd=$(echo "$output" | jq -r '.[0].discovery_score')
+    [[ "$ds" == "null" ]]
+    [[ "$dd" == "null" ]]
+}

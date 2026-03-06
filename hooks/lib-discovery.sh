@@ -152,6 +152,16 @@ infer_bead_action() {
         esac
     fi
 
+    # Interject beads without phase → route to discovery review (not brainstorm)
+    if [[ -z "$phase" ]]; then
+        local bead_title
+        bead_title=$(bd show "$bead_id" --json 2>/dev/null | jq -r '.title // ""') || bead_title=""
+        if [[ "$bead_title" == "[interject]"* ]]; then
+            echo "review_discovery|"
+            return 0
+        fi
+    fi
+
     # Fallback: filesystem-based inference (no phase set)
     if [[ "$status" == "in_progress" ]]; then
         echo "continue|${plan_path}"
@@ -164,6 +174,31 @@ infer_bead_action() {
     else
         echo "brainstorm|"
     fi
+}
+
+# ---- Interject Metadata Extraction ----------------------------------------
+
+# Extract discovery source and relevance score from [interject] bead descriptions.
+# Parses the structured format written by interject's OutputPipeline._create_bead():
+#   Source: <name> | <url>
+#   Relevance score: <float>
+#
+# Args: $1 = bead_id
+# Output: "source|score" to stdout (e.g. "arxiv|0.85"), or "|" if not parseable
+_extract_interject_metadata() {
+    local bead_id="$1"
+    local desc
+    desc=$(bd show "$bead_id" --json 2>/dev/null | jq -r '.description // ""') || { echo "|"; return 0; }
+
+    local source="" score=""
+    if [[ "$desc" =~ Source:\ ([a-z_]+)\ \| ]]; then
+        source="${BASH_REMATCH[1]}"
+    fi
+    if [[ "$desc" =~ Relevance\ score:\ ([0-9]+\.[0-9]+) ]]; then
+        score="${BASH_REMATCH[1]}"
+    fi
+
+    echo "${source}|${score}"
 }
 
 # ─── Parent-Closed Detection ─────────────────────────────────────────
@@ -306,6 +341,15 @@ discovery_scan_beads() {
             plan_path="${action_result#*|}"
         fi
 
+        # Interject metadata extraction
+        local discovery_source="" discovery_score=""
+        if [[ "$title" == "[interject]"* ]]; then
+            local ij_meta
+            ij_meta=$(_extract_interject_metadata "$id")
+            discovery_source="${ij_meta%%|*}"
+            discovery_score="${ij_meta#*|}"
+        fi
+
         # Staleness check: plan mtime if available, else bead updated_at
         # Default to not-stale on any error (stat failure, date parse failure)
         # to avoid false "stale" signals from transient filesystem issues.
@@ -375,7 +419,9 @@ discovery_scan_beads() {
             --argjson score "${score:-0}" \
             --arg parent_closed_epic "${parent_closed_epic:-}" \
             --arg claimed_by "${claimed_by}" \
-            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale, phase: $phase, score: $score, parent_closed_epic: (if $parent_closed_epic == "" then null else $parent_closed_epic end), claimed_by: (if $claimed_by == "" then null else $claimed_by end)}]')
+            --arg discovery_source "${discovery_source}" \
+            --arg discovery_score "${discovery_score}" \
+            '. + [{id: $id, title: $title, priority: $priority, status: $status, action: $action, plan_path: $plan_path, stale: $stale, phase: $phase, score: $score, parent_closed_epic: (if $parent_closed_epic == "" then null else $parent_closed_epic end), claimed_by: (if $claimed_by == "" then null else $claimed_by end), discovery_source: (if $discovery_source == "" then null else $discovery_source end), discovery_score: (if $discovery_score == "" then null else $discovery_score end)}]')
 
         i=$((i + 1))
     done
