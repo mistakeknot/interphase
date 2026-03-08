@@ -134,13 +134,15 @@ The daily hygiene runs at 6:15 AM Pacific across all projects in `/root/projects
 ```bash
 git status              # Check what changed
 git add <files>         # Stage code changes
-bd sync                 # Compatibility sync step (0.50.x syncs, 0.51+ no-op)
 git commit -m "..."     # Commit code
-bd sync                 # Optional second pass in legacy git-portable setups
+bd backup               # Flush state to JSONL (survives Dolt crashes)
+bash .beads/push.sh     # Push Dolt to remote
 git push                # Push to remote
 ```
 
-**NEVER skip this.** Work is not done until pushed.
+**NEVER skip this.** `bd backup` writes fresh JSONL that recovery reads — without it, closes are lost on the next Dolt crash. Work is not done until pushed.
+
+**Close + sync shortcut:** `bash .beads/close-and-sync.sh <id> [--reason="..."]` — closes, backs up, and pushes in one step.
 
 ## Common Workflows
 
@@ -154,8 +156,11 @@ bd update <id> --claim                # Atomically claim it
 **Completing work:**
 ```bash
 bd close <id1> <id2> ...    # Close completed issues
-bd sync                     # Compatibility sync step (0.50.x syncs, 0.51+ no-op)
+bd backup                   # Flush to JSONL immediately
+bash .beads/push.sh         # Push to Dolt remote
 ```
+
+**Or in one step:** `bash .beads/close-and-sync.sh <id1> <id2> ... [--reason="..."]`
 
 **Creating dependent work:**
 ```bash

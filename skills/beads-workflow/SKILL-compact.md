@@ -27,10 +27,12 @@ bd doctor --fix --yes             # Health check and auto-fix
 ## Session Close Protocol (CRITICAL)
 
 ```bash
-git add <files> && git commit -m "..." && bd sync && git push
+git add <files> && git commit -m "..." && bd backup && bash .beads/push.sh && git push
 ```
 
-Never skip. Work is not done until pushed.
+Never skip. `bd backup` writes fresh JSONL that survives Dolt crashes. Work is not done until pushed.
+
+**Close + sync shortcut:** `bash .beads/close-and-sync.sh <id> [--reason="..."]` — closes, backs up, and pushes in one step.
 
 ## Batch Consolidation
 
