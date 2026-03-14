@@ -453,6 +453,139 @@ discovery_scan_beads() {
     # Sort by score DESC, then id ASC (deterministic tiebreaker)
     results=$(echo "$results" | jq 'sort_by(-.score, .id)')
 
+    # Post-scan sweep: check top candidates for "possibly implemented" signals.
+    # Only checks the top 10 results to keep cost bounded.
+    results=$(_discovery_flag_possibly_done "$results" 10)
+
+    echo "$results"
+}
+
+# ─── Possibly-Implemented Detection ──────────────────────────────────
+#
+# Deterministic checks to flag beads that may already be implemented.
+# Cheap heuristics only — no LLM calls. False positives are OK (flagged,
+# not auto-closed). Three checks:
+#   1. Command beads: title mentions a slash command → check if file exists
+#   2. Commit-referenced: bead ID appears in recent git log (last 200 commits)
+#   3. Function beads: title mentions a function → grep lib files
+#
+# Called as a post-filter on sorted discovery results (top N only).
+
+# Check if a single bead appears to be implemented.
+# Args: $1 = bead_id, $2 = title
+# Output: "reason" string if possibly done, empty if not.
+_discovery_check_implemented() {
+    local bead_id="$1"
+    local title="$2"
+    local project_dir="${DISCOVERY_PROJECT_DIR:-.}"
+
+    # --- Check 1: Command beads ---
+    # Patterns: "/namespace:command", "/command-name", "command-name command"
+    # Extract command name from title like "[interspect] /interspect:disable command"
+    # Colon-namespaced commands map to hyphenated filenames: interspect:reset → interspect-reset.md
+    local cmd_name=""
+    if [[ "$title" =~ /([a-z][a-z0-9_-]+):([a-z][a-z0-9_-]+) ]]; then
+        # Namespaced: /interspect:reset → interspect-reset
+        cmd_name="${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+    elif [[ "$title" =~ /([a-z][a-z0-9_-]+) ]]; then
+        cmd_name="${BASH_REMATCH[1]}"
+    elif [[ "$title" =~ ([a-z][a-z0-9_-]+)\ command ]]; then
+        cmd_name="${BASH_REMATCH[1]}"
+    fi
+
+    if [[ -n "$cmd_name" ]]; then
+        # Search for command file in project source dirs only.
+        # Exclude research/, tests/, vendor/, node_modules/, .git/ to avoid false positives
+        # from external test fixtures and archived artifacts.
+        local cmd_file
+        cmd_file=$(find "${project_dir}/os" "${project_dir}/interverse" "${project_dir}/apps" "${project_dir}/core" "${project_dir}/sdk" \
+            -path "*/commands/${cmd_name}.md" \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/tests/*" -not -path "*/vendor*" \
+            2>/dev/null | head -1)
+        if [[ -n "$cmd_file" ]]; then
+            echo "command file exists: ${cmd_file##*/}"
+            return 0
+        fi
+    fi
+
+    # --- Check 2: Commit-referenced ---
+    # Search recent git history for this bead ID in commit messages.
+    # Only match implementation commits (feat/fix/refactor), not triage/docs/chore.
+    if [[ -n "$bead_id" ]]; then
+        local commit_match
+        commit_match=$(git -C "$project_dir" log --oneline -200 --grep="$bead_id" 2>/dev/null \
+            | grep -E '^[0-9a-f]+ (feat|fix|refactor)' | head -1)
+        if [[ -n "$commit_match" ]]; then
+            echo "referenced in commit: ${commit_match:0:50}"
+            return 0
+        fi
+    fi
+
+    # --- Check 3: Function beads ---
+    # If title mentions a function name pattern (snake_case with parens or prefix)
+    local func_name=""
+    if [[ "$title" =~ _([a-z][a-z0-9_]+)\(\) ]]; then
+        func_name="${BASH_REMATCH[0]}"
+        func_name="${func_name%()}"  # strip trailing parens
+    elif [[ "$title" =~ _([a-z][a-z0-9_]+) ]]; then
+        # Only match if it looks intentional (leading underscore = internal function)
+        local candidate="_${BASH_REMATCH[1]}"
+        # Require at least 2 underscores to avoid false positives on words like "_the"
+        if [[ "$candidate" =~ _[a-z]+_[a-z]+ ]]; then
+            func_name="$candidate"
+        fi
+    fi
+
+    if [[ -n "$func_name" ]]; then
+        local func_file
+        func_file=$(grep -rl "^${func_name}()" "${project_dir}/interverse" "${project_dir}/os" 2>/dev/null | head -1)
+        if [[ -n "$func_file" ]]; then
+            echo "function exists in: ${func_file##*/}"
+            return 0
+        fi
+    fi
+
+    echo ""
+}
+
+# Flag top N discovery results with possibly_done signals.
+# Args: $1 = JSON results array, $2 = max beads to check
+# Output: updated JSON array with possibly_done field added
+_discovery_flag_possibly_done() {
+    local results="$1"
+    local max_check="${2:-10}"
+    local project_dir="${DISCOVERY_PROJECT_DIR:-.}"
+
+    local count
+    count=$(echo "$results" | jq 'length' 2>/dev/null) || count=0
+    [[ "$count" -eq 0 ]] && { echo "$results"; return 0; }
+
+    local check_count=$max_check
+    [[ $check_count -gt $count ]] && check_count=$count
+
+    local i=0
+    while [[ $i -lt $check_count ]]; do
+        local id title
+        id=$(echo "$results" | jq -r ".[$i].id // empty")
+        title=$(echo "$results" | jq -r ".[$i].title // empty")
+
+        # Skip null IDs (orphans) and already-closed items
+        if [[ -z "$id" || "$id" == "null" ]]; then
+            i=$((i + 1))
+            continue
+        fi
+
+        local reason
+        reason=$(_discovery_check_implemented "$id" "$title")
+
+        if [[ -n "$reason" ]]; then
+            results=$(echo "$results" | jq --argjson idx "$i" --arg reason "$reason" \
+                '.[$idx].possibly_done = $reason')
+        fi
+
+        i=$((i + 1))
+    done
+
     echo "$results"
 }
 
