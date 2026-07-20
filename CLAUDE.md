@@ -5,7 +5,7 @@ Companion plugin for Clavain that provides lifecycle phase tracking, gate valida
 ## Overview
 
 - `hooks/lib-phase.sh` — Phase state tracking (set/get/infer bead phases)
-- `hooks/lib-gates.sh` — Gate validation, dual persistence (beads + artifact headers), statusline updates
+- `hooks/lib-gates.sh` — Gate validation, dual persistence (beads + artifact headers)
 - `hooks/lib-discovery.sh` — Work discovery scanner (scan open beads, infer next actions)
 - `skills/beads-workflow/` — Beads workflow skill with CLI reference and troubleshooting
 
@@ -26,7 +26,7 @@ python3 -c "import json; json.load(open('.claude-plugin/plugin.json'))"
 
 ## interline Integration
 
-`_gate_update_statusline()` in `hooks/lib-gates.sh` writes structured sideband state to `~/.interband/interphase/bead/${session_id}.json` (envelope + payload), and also writes legacy `/tmp/clavain-bead-${session_id}.json` for backward compatibility. These are read by the **interline** companion plugin's statusline renderer to display bead context (ID + phase). No direct dependency — communication is via file-based sideband.
+The statusline sideband is **kernel-authored** (Sylveste-rfs, 2026-07-20): `clavain-cli sprint-advance` (`writeBeadSideband` in os/Clavain) writes the interband envelope to `~/.interband/interphase/bead/${session_id}.json` plus the legacy `/tmp/clavain-bead-${session_id}.json`. interphase no longer writes the sideband — its `_gate_update_statusline` writer was retired per the f-005 consumer-migration rule. The **interline** statusline renderer reads the envelope (legacy path as fallback) to display bead context (ID + phase). No direct dependency — communication is via file-based sideband.
 
 ## Configuration
 

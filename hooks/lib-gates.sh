@@ -489,8 +489,8 @@ advance_phase() {
 
     _gate_log_advance "$bead_id" "$target" "$reason" "$artifact_path"
 
-    # Update statusline state file (read by ~/.claude/statusline.sh)
-    _gate_update_statusline "$bead_id" "$target" "$reason"
+    # Statusline sideband is kernel-authored now (clavain-cli sprint-advance
+    # writeBeadSideband, Sylveste-rfs) — interphase no longer writes it.
 }
 
 # Get the current phase with fallback: beads first, then artifact header.
@@ -622,42 +622,6 @@ _gate_sed_escape() {
     str="${str//\//\\/}"
     str="${str//&/\\&}"
     echo "$str"
-}
-
-# Write bead context to a session-keyed state file for the statusline.
-# The statusline script runs as a subprocess and can't see in-conversation
-# state, so we use /tmp/clavain-bead-<session_id>.json as a sideband channel.
-#
-# Args: $1 = bead_id, $2 = phase, $3 = reason (optional)
-_gate_update_statusline() {
-    local bead_id="$1" phase="$2" reason="${3:-}"
-    local session_id="${CLAUDE_SESSION_ID:-}"
-    [ -z "$session_id" ] && return 0
-    local state_file="/tmp/clavain-bead-${session_id}.json"
-    local payload_json
-    payload_json=$(jq -n -c \
-        --arg id "$bead_id" --arg phase "$phase" \
-        --arg reason "$reason" --arg ts "$(date +%s)" \
-        '{id:$id, phase:$phase, reason:$reason, ts:($ts|tonumber)}' \
-    ) || payload_json=""
-    [[ -z "$payload_json" ]] && return 0
-
-    # Preferred path: structured sideband envelope under ~/.interband.
-    if _gate_load_interband && type interband_path >/dev/null 2>&1 && type interband_write >/dev/null 2>&1; then
-        local interband_file
-        interband_file=$(interband_path "interphase" "bead" "$session_id" 2>/dev/null) || interband_file=""
-        if [[ -n "$interband_file" ]]; then
-            interband_write "$interband_file" "interphase" "bead_phase" "$session_id" "$payload_json" \
-                2>/dev/null || true
-            if type interband_prune_channel >/dev/null 2>&1; then
-                interband_prune_channel "interphase" "bead" 2>/dev/null || true
-            fi
-        fi
-    fi
-
-    # Backward-compatible legacy path for existing consumers.
-    local tmp_file="${state_file}.tmp.$$"
-    printf '%s\n' "$payload_json" > "$tmp_file" 2>/dev/null && mv -f "$tmp_file" "$state_file" 2>/dev/null || true
 }
 
 # ─── Telemetry ───────────────────────────────────────────────────────

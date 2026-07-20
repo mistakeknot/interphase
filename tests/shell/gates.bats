@@ -530,62 +530,16 @@ EOF
     [[ $(echo "$line" | jq -r '.artifact') == "docs/plans/test.md" ]]
 }
 
-# ─── _gate_update_statusline ─────────────────────────────────────────
+# ─── Sideband (kernel-authored — Sylveste-rfs) ───────────────────────
 
-@test "_gate_update_statusline: writes state file when CLAUDE_SESSION_ID is set" {
-    export CLAUDE_SESSION_ID="test-session-abc"
-    _gate_update_statusline "Clavain-021h" "planned" "Plan: docs/plans/test.md"
-
-    local state_file="/tmp/clavain-bead-test-session-abc.json"
-    [[ -f "$state_file" ]]
-    # Validate JSON structure
-    jq empty "$state_file"
-    [[ $(jq -r '.id' "$state_file") == "Clavain-021h" ]]
-    [[ $(jq -r '.phase' "$state_file") == "planned" ]]
-    [[ $(jq -r '.reason' "$state_file") == "Plan: docs/plans/test.md" ]]
-    [[ $(jq -r '.ts' "$state_file") =~ ^[0-9]+$ ]]
-
-    local interband_file="$HOME/.interband/interphase/bead/test-session-abc.json"
-    [[ -f "$interband_file" ]]
-    [[ $(jq -r '.version' "$interband_file") == 1.* ]]
-    [[ $(jq -r '.namespace' "$interband_file") == "interphase" ]]
-    [[ $(jq -r '.type' "$interband_file") == "bead_phase" ]]
-    [[ $(jq -r '.payload.id' "$interband_file") == "Clavain-021h" ]]
-    [[ $(jq -r '.payload.phase' "$interband_file") == "planned" ]]
-
-    rm -f "$state_file"
-    rm -f "$interband_file"
-}
-
-@test "_gate_update_statusline: skips silently when CLAUDE_SESSION_ID is unset" {
-    unset CLAUDE_SESSION_ID
-    run _gate_update_statusline "Clavain-021h" "planned" "reason"
-    assert_success
-    # No file should exist with empty session id
-    [[ ! -f "/tmp/clavain-bead-.json" ]]
-}
-
-@test "_gate_update_statusline: overwrites on phase change" {
-    export CLAUDE_SESSION_ID="test-session-overwrite"
-    _gate_update_statusline "Clavain-021h" "planned" "Plan created"
-    _gate_update_statusline "Clavain-021h" "executing" "Started work"
-
-    local state_file="/tmp/clavain-bead-test-session-overwrite.json"
-    [[ $(jq -r '.phase' "$state_file") == "executing" ]]
-
-    rm -f "$state_file"
-}
-
-@test "advance_phase: writes statusline state file" {
-    export CLAUDE_SESSION_ID="test-session-advance"
+@test "advance_phase: does NOT write the statusline sideband (kernel is sole writer)" {
+    export CLAUDE_SESSION_ID="test-session-nosideband"
     advance_phase "Test-001" "brainstorm" "Created brainstorm"
 
-    local state_file="/tmp/clavain-bead-test-session-advance.json"
-    [[ -f "$state_file" ]]
-    [[ $(jq -r '.id' "$state_file") == "Test-001" ]]
-    [[ $(jq -r '.phase' "$state_file") == "brainstorm" ]]
-
-    rm -f "$state_file"
+    # interphase's writer retired 2026-07-20; clavain-cli sprint-advance
+    # (writeBeadSideband) is the only sideband author now.
+    [[ ! -f "/tmp/clavain-bead-test-session-nosideband.json" ]]
+    [[ ! -f "$HOME/.interband/interphase/bead/test-session-nosideband.json" ]]
 }
 
 # ─── Telemetry ────────────────────────────────────────────────────────
