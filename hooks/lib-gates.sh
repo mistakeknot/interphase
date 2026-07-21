@@ -620,7 +620,8 @@ _gate_read_artifact_phase() {
     # Extract: **Phase:** <value> (as of <timestamp>)
     # Strip "**Phase:** " prefix and optional " (as of ...)" suffix
     local phase
-    phase=$(echo "$line" | sed 's/^\*\*Phase:\*\*\s*//' | sed 's/\s*(as of .*)$//')
+    # [[:space:]] not \s — \s is a GNU sed extension BSD sed lacks (Sylveste-sne)
+    phase=$(echo "$line" | sed 's/^\*\*Phase:\*\*[[:space:]]*//' | sed 's/[[:space:]]*(as of .*)$//')
     echo "$phase"
 }
 

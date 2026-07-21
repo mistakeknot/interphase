@@ -24,6 +24,26 @@ fi
 #
 # Args: $1 = priority (0-4), $2 = phase, $3 = updated_at (ISO 8601), $4 = stale (true/false)
 # Output: integer score to stdout
+# Parse an ISO8601/RFC3339 UTC timestamp to epoch seconds, portably.
+# GNU `date -d` first; BSD `date -j -u -f` fallback (fractional seconds
+# and Z/+00:00 suffixes normalized). Echoes empty on failure (Sylveste-a3a).
+_discovery_iso_to_epoch() {
+    local ts="${1:-}"
+    if [[ -z "$ts" || "$ts" == "null" ]]; then
+        echo ""
+        return 0
+    fi
+    local epoch
+    epoch=$(date -d "$ts" +%s 2>/dev/null) || epoch=""
+    if [[ -z "$epoch" ]]; then
+        local norm="${ts%%.*}"
+        norm="${norm%+00:00}"
+        norm="${norm%Z}"
+        epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$norm" +%s 2>/dev/null) || epoch=""
+    fi
+    echo "$epoch"
+}
+
 score_bead() {
     local priority="${1:-4}"
     local phase="${2:-}"
@@ -57,7 +77,7 @@ score_bead() {
     # Recency score (0-20): recently touched beads are more relevant
     if [[ -n "$updated_at" && "$updated_at" != "null" ]]; then
         local updated_epoch now_epoch age_hours
-        updated_epoch=$(date -d "$updated_at" +%s 2>/dev/null || echo "")
+        updated_epoch=$(_discovery_iso_to_epoch "$updated_at")
         now_epoch=$(date +%s)
         if [[ -n "$updated_epoch" && "$updated_epoch" -gt 0 ]]; then
             age_hours=$(( (now_epoch - updated_epoch) / 3600 ))
@@ -362,7 +382,7 @@ discovery_scan_beads() {
             fi
         elif [[ -n "$updated" && "$updated" != "null" && "$updated" != "" ]]; then
             local updated_epoch
-            updated_epoch=$(date -d "$updated" +%s 2>/dev/null || echo "")
+            updated_epoch=$(_discovery_iso_to_epoch "$updated")
             if [[ -n "$updated_epoch" && "$updated_epoch" -lt "$two_days_ago" ]]; then
                 stale=true
             fi

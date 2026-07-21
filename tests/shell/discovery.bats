@@ -545,6 +545,16 @@ MDEOF
 @test "brief_scan: uses cache on second call" {
     mock_bd '[{"id":"Test-c1","title":"Cached","status":"open","priority":1,"updated_at":"2026-02-12T10:00:00Z"}]'
 
+    # The cache lives in intercore state, whose functions the CONSUMER
+    # (e.g. Clavain lib-intercore.sh) provides — stub that contract with
+    # a file-backed fake so the cache branch is actually exercised.
+    export _IC_STATE_DIR="$BATS_TEST_TMPDIR/ic-state"
+    mkdir -p "$_IC_STATE_DIR"
+    intercore_available() { return 0; }
+    intercore_state_get() { cat "$_IC_STATE_DIR/${1}_${2//\//_}" 2>/dev/null; }
+    intercore_state_set() { printf '%s' "$3" > "$_IC_STATE_DIR/${1}_${2//\//_}"; }
+    export -f intercore_available intercore_state_get intercore_state_set
+
     # First call populates cache
     run discovery_brief_scan
     assert_success

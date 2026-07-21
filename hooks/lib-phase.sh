@@ -80,7 +80,12 @@ phase_get() {
         return 0
     fi
 
-    bd state "$bead_id" phase 2>/dev/null || echo ""
+    local val
+    val=$(bd state "$bead_id" phase 2>/dev/null) || val=""
+    # bd prints "(no phase state set)" with exit 0 for unset dimensions —
+    # treat the sentinel as no phase, not as a phase value.
+    [[ "$val" == "(no "* ]] && val=""
+    echo "$val"
 }
 
 # ─── Bead ID Resolution ─────────────────────────────────────────────
