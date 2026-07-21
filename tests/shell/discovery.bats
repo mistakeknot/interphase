@@ -68,6 +68,9 @@ mock_bd_garbage() {
     local stub="$BATS_TEST_TMPDIR/no-bd-path"
     mkdir -p "$stub"
     ln -sf "$(command -v dirname)" "$stub/dirname"
+    # An inherited exported bd FUNCTION (dev shells export one) survives
+    # PATH stubbing — clear it or command -v still resolves bd.
+    unset -f bd 2>/dev/null || true
     local old_path="$PATH"
     PATH="$stub"
     unset _DISCOVERY_LOADED
@@ -524,6 +527,7 @@ MDEOF
     local stub="$BATS_TEST_TMPDIR/no-bd-path"
     mkdir -p "$stub"
     ln -sf "$(command -v dirname)" "$stub/dirname"
+    unset -f bd 2>/dev/null || true
     local old_path="$PATH"
     PATH="$stub"
     unset _DISCOVERY_LOADED
