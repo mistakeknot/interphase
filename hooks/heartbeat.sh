@@ -16,7 +16,7 @@ command -v bd &>/dev/null || exit 0
 
 _hb_interval="${CLAVAIN_HEARTBEAT_INTERVAL:-15}"
 _hb_file="/tmp/clavain-heartbeat-${CLAVAIN_BEAD_ID}-${CLAUDE_SESSION_ID:-unknown}"
-_hb_mtime=$(stat -c %Y "$_hb_file" 2>/dev/null || echo 0)
+_hb_mtime=$(stat -c %Y "$_hb_file" 2>/dev/null || stat -f %m "$_hb_file" 2>/dev/null || echo 0)
 now=$(date +%s)
 (( now - _hb_mtime < _hb_interval )) && exit 0
 

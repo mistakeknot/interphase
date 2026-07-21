@@ -6,9 +6,10 @@ HOOKS_DIR="$BATS_TEST_DIRNAME/../../hooks"
 export CLAUDE_PLUGIN_ROOT="$BATS_TEST_DIRNAME/../.."
 
 # Load bats-support and bats-assert from npm global modules
-# Try common npm global paths
+# Try common npm global paths (Linux, macOS Homebrew, and the active npm prefix)
 NPM_GLOBAL=""
-for candidate in /usr/lib/node_modules /usr/local/lib/node_modules; do
+for candidate in /usr/lib/node_modules /usr/local/lib/node_modules \
+                 /opt/homebrew/lib/node_modules "$(npm root -g 2>/dev/null)"; do
     if [[ -d "$candidate/bats-support" ]]; then
         NPM_GLOBAL="$candidate"
         break

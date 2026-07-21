@@ -565,27 +565,37 @@ _gate_write_artifact_phase() {
     local timestamp
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
     local phase_line="**Phase:** ${phase} (as of ${timestamp})"
-    local escaped_phase_line
-    escaped_phase_line=$(_gate_sed_escape "$phase_line")
 
-    # Strategy 1: Update existing **Phase:** line
+    # Strategy 1: update existing **Phase:** line; 2: insert after
+    # **Bead:** line; 3: insert after first # heading.
+    local mode=""
     if grep -q '^\*\*Phase:\*\*' "$filepath" 2>/dev/null; then
-        sed -i "s|^\*\*Phase:\*\*.*|${escaped_phase_line}|" "$filepath" 2>/dev/null || true
+        mode="replace"
+    elif grep -q '^\*\*Bead:\*\*' "$filepath" 2>/dev/null; then
+        mode="after_bead"
+    elif grep -q '^# ' "$filepath" 2>/dev/null; then
+        mode="after_heading"
+    else
         return 0
     fi
 
-    # Strategy 2: Insert after **Bead:** line
-    if grep -q '^\*\*Bead:\*\*' "$filepath" 2>/dev/null; then
-        sed -i "/^\*\*Bead:\*\*/a\\${escaped_phase_line}" "$filepath" 2>/dev/null || true
-        return 0
+    # GNU sed-isms (-i without arg, inline a\, 0,/re/ ranges) silently
+    # no-op on BSD sed (Sylveste-sne), so the rewrite goes through awk
+    # with a temp file. The phase line rides in via ENVIRON to avoid
+    # awk -v escape-sequence mangling.
+    local tmpfile
+    tmpfile=$(mktemp "${filepath}.phase.XXXXXX" 2>/dev/null) || return 0
+    if PHASE_LINE="$phase_line" awk -v mode="$mode" '
+        BEGIN { pl = ENVIRON["PHASE_LINE"]; done = 0 }
+        mode == "replace" && /^\*\*Phase:\*\*/ { print pl; next }
+        { print }
+        mode == "after_bead" && /^\*\*Bead:\*\*/ { print pl }
+        mode == "after_heading" && /^# / && !done { print pl; done = 1 }
+    ' "$filepath" > "$tmpfile" 2>/dev/null; then
+        cat "$tmpfile" > "$filepath" 2>/dev/null || true
     fi
-
-    # Strategy 3: Insert after first # heading
-    if grep -q '^# ' "$filepath" 2>/dev/null; then
-        sed -i "0,/^# /{/^# /a\\${escaped_phase_line}
-}" "$filepath" 2>/dev/null || true
-        return 0
-    fi
+    rm -f "$tmpfile"
+    return 0
 }
 
 # Read phase value from **Phase:** line in an artifact file.
@@ -612,16 +622,6 @@ _gate_read_artifact_phase() {
     local phase
     phase=$(echo "$line" | sed 's/^\*\*Phase:\*\*\s*//' | sed 's/\s*(as of .*)$//')
     echo "$phase"
-}
-
-# Escape a string for safe use in sed replacement.
-# Handles backslash, forward slash, and ampersand.
-_gate_sed_escape() {
-    local str="$1"
-    str="${str//\\/\\\\}"
-    str="${str//\//\\/}"
-    str="${str//&/\\&}"
-    echo "$str"
 }
 
 # ─── Telemetry ───────────────────────────────────────────────────────

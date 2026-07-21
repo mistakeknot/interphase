@@ -61,12 +61,15 @@ mock_bd_garbage() {
 # ─── discovery_scan_beads: bd not available ───────────────────────────
 
 @test "discovery: outputs DISCOVERY_UNAVAILABLE when bd not installed" {
-    # Hide bd from PATH
-    bd() { return 127; }
-    unset -f bd
-    # Temporarily remove bd from PATH
+    # Hide bd: PATH becomes a stub dir carrying only the tools the lib
+    # needs at source time (dirname), with no bd in it. Nuking PATH
+    # outright breaks the source-time dirname call, not the behavior
+    # under test.
+    local stub="$BATS_TEST_TMPDIR/no-bd-path"
+    mkdir -p "$stub"
+    ln -sf "$(command -v dirname)" "$stub/dirname"
     local old_path="$PATH"
-    PATH="/nonexistent"
+    PATH="$stub"
     unset _DISCOVERY_LOADED
     source "$HOOKS_DIR/lib-discovery.sh"
     run discovery_scan_beads
@@ -516,9 +519,13 @@ MDEOF
 }
 
 @test "brief_scan: returns nothing when bd unavailable" {
-    # Hide bd from PATH
+    # Hide bd via a stub PATH that keeps source-time tools available
+    # (see the DISCOVERY_UNAVAILABLE test above).
+    local stub="$BATS_TEST_TMPDIR/no-bd-path"
+    mkdir -p "$stub"
+    ln -sf "$(command -v dirname)" "$stub/dirname"
     local old_path="$PATH"
-    PATH="/nonexistent"
+    PATH="$stub"
     unset _DISCOVERY_LOADED
     source "$HOOKS_DIR/lib-discovery.sh"
 
