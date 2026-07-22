@@ -7,7 +7,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/heartbeat.sh",
-            "timeout": 2
+            "timeout": 2,
+            "args": []
           }
         ]
       },
@@ -17,7 +18,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/bead-autoclaim.sh",
-            "timeout": 3
+            "timeout": 3,
+            "args": []
           }
         ]
       }
@@ -28,7 +30,8 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/session-end-release.sh",
-            "timeout": 5
+            "timeout": 5,
+            "args": []
           }
         ]
       }
