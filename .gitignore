@@ -15,4 +15,6 @@ __pycache__/
 *.sw?
 .clavain/
 .clavain/**/*.db
+.clavain/**/*.db-shm
+.clavain/**/*.db-wal
 .publish-approved
