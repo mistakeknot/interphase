@@ -14,7 +14,5 @@ __pycache__/
 .vscode/
 *.sw?
 .clavain/
+.clavain/**/*.db
 .publish-approved
-
-# Machine-local interspect telemetry (SQLite); git-autosync does 'git add -A'
-.clavain/interspect/
