@@ -15,3 +15,6 @@ __pycache__/
 *.sw?
 .clavain/
 .publish-approved
+
+# Machine-local interspect telemetry (SQLite); git-autosync does 'git add -A'
+.clavain/interspect/
