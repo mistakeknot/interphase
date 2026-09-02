@@ -5,15 +5,24 @@
 # Sentinel convention: claimed_by=released, claimed_at=0
 # (bd set-state rejects empty values, so we use sentinels instead)
 
+# shellcheck source=hooks/lib-phase.sh
+source "${BASH_SOURCE[0]%/*}/lib-phase.sh" 2>/dev/null || true
+# Our session: the hook payload first, then the env registers (mk-rd9f). With
+# the old bare read every start-hook-less session was "unknown" and released
+# whichever claim it found.
+_se_input=""
+[[ -t 0 ]] || _se_input="$(cat 2>/dev/null || true)"
+_our_session="$(_interphase_session_id "$_se_input" 2>/dev/null)" || _our_session=""
+[[ -n "$_our_session" ]] || _our_session="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-unknown}}"
+
 # Discover bead ID: env var (set by route/CLAUDE_ENV_FILE) or marker file (set by autoclaim)
 if [[ -z "${CLAVAIN_BEAD_ID:-}" ]]; then
-    _marker="/tmp/interphase-bead-${CLAUDE_SESSION_ID:-unknown}"
+    _marker="/tmp/interphase-bead-${_our_session}"
     [[ -f "$_marker" ]] && CLAVAIN_BEAD_ID=$(cat "$_marker" 2>/dev/null) || true
 fi
 [[ -n "${CLAVAIN_BEAD_ID:-}" ]] || exit 0
 command -v bd &>/dev/null || exit 0
 
-_our_session="${CLAUDE_SESSION_ID:-unknown}"
 _claimer=$(bd state "$CLAVAIN_BEAD_ID" claimed_by 2>/dev/null) || _claimer=""
 
 # Release if unclaimed, released, or owned by us

@@ -13,6 +13,9 @@ command -v bd &>/dev/null || exit 0
 # Read hook input
 INPUT=$(cat)
 
+# shellcheck source=hooks/lib-phase.sh
+source "${BASH_SOURCE[0]%/*}/lib-phase.sh" 2>/dev/null || true
+
 # Extract the command that was run
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null) || exit 0
 [[ -n "$COMMAND" ]] || exit 0
@@ -32,7 +35,9 @@ EXIT_CODE=$(echo "$INPUT" | jq -r '.tool_result.exit_code // ""' 2>/dev/null) ||
 
 # Extract issue ID from the command (first argument after bd update/claim)
 # Note: separate lookbehinds required — PCRE rejects variable-length (?:update|claim)
-ISSUE_ID=$(echo "$COMMAND" | grep -oP '(?<=bd update |bd claim )\S+' 2>/dev/null) || exit 0
+# sed, not grep -P: BSD grep on macOS has no PCRE, and the old form exited 0
+# there before ever reaching the claim.
+ISSUE_ID=$(echo "$COMMAND" | sed -nE 's/.*bd (update|claim) ([^[:space:]]+).*/\2/p' 2>/dev/null | head -1) || exit 0
 [[ -n "$ISSUE_ID" ]] || exit 0
 
 # If CLAVAIN_BEAD_ID already matches this bead, nothing to do (idempotent)
@@ -40,7 +45,11 @@ if [[ "${CLAVAIN_BEAD_ID:-}" == "$ISSUE_ID" ]]; then
     exit 0
 fi
 
-SESSION_ID="${CLAUDE_SESSION_ID:-unknown}"
+# The stdin session_id first (mk-rd9f): CLAUDE_SESSION_ID is absent when
+# clavain's start hook did not fire, and "unknown" is treated as unclaimed below,
+# so every such session would silently stomp every other.
+SESSION_ID="$(_interphase_session_id "$INPUT" 2>/dev/null)" || SESSION_ID=""
+[[ -n "$SESSION_ID" ]] || SESSION_ID="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-unknown}}"
 
 # Collision check — don't stomp another session's active claim
 # Sentinel "released" and "unknown" are treated as unclaimed
