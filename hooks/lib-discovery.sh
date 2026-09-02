@@ -410,7 +410,7 @@ discovery_scan_beads() {
             && "$claimed_by_val" != "(no claimed_by state set)" \
             && "$claimed_by_val" != "released" \
             && "$claimed_by_val" != "unknown" \
-            && "$claimed_by_val" != "${CLAUDE_SESSION_ID:-}" ]]; then
+            && "$claimed_by_val" != "${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}" ]]; then
             local claimed_at_val age_sec
             claimed_at_val=$(bd state "$id" claimed_at 2>/dev/null) || claimed_at_val=""
             if [[ -n "$claimed_at_val" && "$claimed_at_val" != "(no claimed_at state set)" && "$claimed_at_val" != "0" ]]; then

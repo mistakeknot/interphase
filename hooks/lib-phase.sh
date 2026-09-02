@@ -18,6 +18,28 @@ _PHASE_LOADED=1
 
 PHASE_PROJECT_DIR="${PHASE_PROJECT_DIR:-.}"
 
+# ─── Session identity ────────────────────────────────────────────────
+# The session this hook or command is running in (mk-rd9f, 2026-09-02).
+# Claude Code hands every hook its session_id on stdin and exports
+# CLAUDE_CODE_SESSION_ID into the Bash tool; CLAUDE_SESSION_ID exists only after
+# clavain's session-start hook wrote it, so a reader keyed on it alone collapses
+# to "unknown" in every session whose start hook did not fire — and "unknown"
+# is the value the claim logic treats as unclaimed. Precedence:
+#   1. $1, the hook's stdin payload (JSON carrying .session_id)
+#   2. CLAUDE_SESSION_ID
+#   3. CLAUDE_CODE_SESSION_ID
+#   4. $2, the fallback (default "unknown")
+# Prints the id, returns 0 always, never writes to stderr.
+_interphase_session_id() {
+    local _input="${1:-}" _fallback="${2:-unknown}" _sid=""
+    if [[ -n "$_input" ]] && command -v jq >/dev/null 2>&1; then
+        _sid=$(printf '%s' "$_input" | jq -r '.session_id // empty' 2>/dev/null) || _sid=""
+    fi
+    [[ -n "$_sid" ]] || _sid="${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}"
+    printf '%s' "${_sid:-$_fallback}"
+    return 0
+}
+
 # Valid phases in lifecycle order. Used for validation and by future F6 gate library.
 CLAVAIN_PHASES=(
     brainstorm
