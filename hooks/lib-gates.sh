@@ -280,7 +280,7 @@ _gate_check_interband_dependency() {
     _GATE_DEP_ERROR_REASON=""
 
     # No session means no sideband target requirement.
-    if [[ -z "${CLAUDE_SESSION_ID:-}" ]]; then
+    if [[ -z "${CLAUDE_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}" ]]; then
         return 0
     fi
 
